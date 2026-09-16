@@ -396,6 +396,25 @@ struct AppAIGatewayClientTests {
         #expect(outage.monthlyRequestQuota == nil)
     }
 
+    @Test
+    func expiredAccountLifecycleErrorsRequireOwnerAction() throws {
+        for (wireCode, expected) in [
+            ("billing_trial_expired", GatewayErrorCode.billingTrialExpired),
+            ("account_expired", GatewayErrorCode.accountExpired),
+        ] {
+            let error = try #require(GatewayError(
+                response: HTTPURLResponse(
+                    url: URL(string: "https://gateway.example.test/v1/apps/a/proxy/openai/v1/responses")!,
+                    statusCode: 403, httpVersion: nil, headerFields: nil
+                )!,
+                body: Data("{\"error\":{\"code\":\"\(wireCode)\",\"message\":\"Account action required\"}}".utf8)
+            ))
+            #expect(error.code == expected)
+            #expect(error.isRetryable == false)
+            #expect(error.monthlyRequestQuota == nil)
+        }
+    }
+
     /// The gateway's only quota. Before it was listed, an exhausted month
     /// reached the app as `.unknown`, which says nothing an app could act on.
     @Test

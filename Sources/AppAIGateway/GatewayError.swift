@@ -25,13 +25,18 @@ public enum GatewayErrorCode: String, Codable, Sendable {
     /// Carries no verdict on the subscription: the request is worth sending
     /// again, and ``GatewayError/isRetryable`` says so.
     case billingUnavailable = "billing_unavailable"
-    /// The organization used up the calendar-month request allowance its plan
+    /// The fixed onboarding allowance ended. The account owner must claim the
+    /// account; retrying or replacing application credentials cannot help.
+    case billingTrialExpired = "billing_trial_expired"
+    /// The unclaimed account passed its recovery deadline and cannot be used.
+    case accountExpired = "account_expired"
+    /// The organization used up the current scheduled request allowance its plan
     /// grants. Shared by every application, credential and user the organization
     /// owns, so another client's traffic can exhaust it, and nothing the app
     /// configured caused it.
     ///
     /// Read ``GatewayError/monthlyRequestQuota`` for the allowance, what has
-    /// been spent, and the instant a fresh month begins.
+    /// been spent, and the instant the next allowance period begins.
     case billingRequestQuotaExceeded = "billing_request_quota_exceeded"
     /// A per-minute or per-day request limit this application's operator set on
     /// its own users refused the call.
