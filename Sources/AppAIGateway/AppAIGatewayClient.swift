@@ -85,6 +85,16 @@ public actor AppAIGatewayClient {
     private var accessToken: AccessToken?
     private var tokenExchangeTask: Task<String, Error>?
     private var refreshTask: Task<Void, Never>?
+    private var rateLimitHold: RateLimitHold?
+
+    /// A refusal the gateway timed, and the instant its window closes.
+    ///
+    /// In memory and per client: this enforces nothing, it only stops this
+    /// client from spending a window it has already been told about.
+    private struct RateLimitHold {
+        let until: Date
+        let error: GatewayError
+    }
 
     public init(
         appID: String,
@@ -113,6 +123,10 @@ public actor AppAIGatewayClient {
         refreshTask?.cancel()
     }
 
+    /// A token already in hand is still a token: a hold is only ever consulted
+    /// where an exchange would otherwise be started, never in front of the
+    /// cache, so a rate-limited window does not strand a client that is holding
+    /// a perfectly good token.
     public func gatewayAccessToken() async throws -> String {
         if case .apiKey(let key, nil) = authMode { return key }
         if let accessToken, accessToken.refreshAt.timeIntervalSinceNow > 0 {
@@ -121,7 +135,35 @@ public actor AppAIGatewayClient {
         return try await refreshGatewayAccessToken()
     }
 
+    /// Refuses, without a request, while a window the gateway timed is still
+    /// open, and re-raises the refusal that opened it with the time that is
+    /// actually left.
+    ///
+    /// Without this a rate-limited window costs an Apple attestation on every
+    /// call the app makes. A refused `register` leaves no key stored, so the
+    /// next call finds none, generates one and attests it with Apple — against
+    /// Apple's own attestation limits — only for the gateway to refuse it
+    /// again, for as long as the window lasts. This is not a retry: nothing is
+    /// scheduled and nothing is attempted again. It only declines to spend a
+    /// window the gateway has already said is spent.
+    private func heldRateLimit() throws {
+        guard let hold = rateLimitHold else { return }
+        let remaining = hold.until.timeIntervalSinceNow
+        guard remaining > 0 else {
+            rateLimitHold = nil
+            return
+        }
+        throw GatewayError(
+            code: hold.error.code,
+            message: hold.error.message,
+            statusCode: hold.error.statusCode,
+            data: hold.error.data,
+            retryAfter: remaining
+        )
+    }
+
     private func refreshGatewayAccessToken() async throws -> String {
+        try heldRateLimit()
         if let tokenExchangeTask { return try await tokenExchangeTask.value }
         let task = Task {
             try await self.exchangeToken(forceIssuerRefresh: false, retryIssuerOnce: true)
@@ -305,9 +347,20 @@ public actor AppAIGatewayClient {
         return SignedAssertion(keyID: keyID, challenge: challengeValue, assertion: assertion)
     }
 
+    /// Registers a replacement, and lets `registerKey` store it once the
+    /// gateway has accepted it.
+    ///
+    /// The old id is deliberately *not* cleared first. Clearing up front is only
+    /// free when the registration that follows succeeds; when it fails — and a
+    /// rate-limited one above all — it leaves nothing stored at all, and every
+    /// later call then starts from no key and attests a brand-new one with
+    /// Apple. Keeping the old id until a new one replaces it costs at most one
+    /// refused attempt on the next call, and saves the one case where the id was
+    /// never the problem: `generateAssertion` can fail for a reason that has
+    /// nothing to do with the key, and a device that threw its working key away
+    /// for one of those can never get it back.
     private func replaceKey(forceIssuerRefresh: Bool) async throws -> String {
-        try credentialStore.setAppAttestKeyID(nil, for: appID)
-        return try await registerKey(forceIssuerRefresh: forceIssuerRefresh)
+        try await registerKey(forceIssuerRefresh: forceIssuerRefresh)
     }
 
     /// Omits `issuer_token` entirely in install mode. The gateway refuses one
@@ -385,13 +438,26 @@ public actor AppAIGatewayClient {
         guard (200..<300).contains(http.statusCode) else {
             let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: data)
             let rawCode = envelope?.error.code ?? "unknown"
-            throw GatewayError(
+            let error = GatewayError(
                 code: GatewayErrorCode(rawValue: rawCode) ?? .unknown,
                 message: envelope?.error.message ?? "Gateway request failed",
                 statusCode: http.statusCode,
                 data: envelope?.error.data ?? [:],
                 retryAfter: GatewayError.retryAfter(from: http)
             )
+            // Every request this method sends is one of the three
+            // authentication endpoints the gateway counts, so this is the one
+            // place a timed refusal can be caught for all of them. Any `429`
+            // that names a wait is honoured, whatever its code: the gateway has
+            // said when to come back, and a client that calls sooner is only
+            // spending the window it was asked to wait out.
+            if http.statusCode == 429, let seconds = error.retryAfter, seconds > 0 {
+                rateLimitHold = RateLimitHold(
+                    until: Date().addingTimeInterval(seconds),
+                    error: error
+                )
+            }
+            throw error
         }
         return try JSONDecoder().decode(Response.self, from: data)
     }

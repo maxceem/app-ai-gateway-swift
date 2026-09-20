@@ -28,11 +28,15 @@ struct MockAttestProvider: AppAttestProviding {
     /// behind, the Secure Enclave key having gone with the old install while
     /// the keychain entry naming it stayed.
     var deadKeyIDs: Set<String> = []
+    /// Counts the attestations Apple would have been asked for. A reference so
+    /// the provider can stay the value type the client takes.
+    var attestations: LockedCounter?
 
     var isSupported: Bool { true }
     func generateKey() async throws -> String { "generated-key" }
     func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data {
-        Data("attestation".utf8)
+        attestations?.increment()
+        return Data("attestation".utf8)
     }
     func generateAssertion(_ keyID: String, clientDataHash: Data) async throws -> Data {
         // `DCError.invalidInput` is what iOS actually raises here.
@@ -707,5 +711,163 @@ struct AppAIGatewayClientTests {
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer agw_machine-key")
         #expect(request.value(forHTTPHeaderField: "X-End-User-ID") == "customer-42")
         #expect(networkCalls.snapshot() == 0)
+    }
+
+    /// The gateway's own protection of its authentication endpoints is not one
+    /// of the limits an application sets on its users, so it carries no scope
+    /// to read — but it is still something waiting fixes.
+    @Test
+    func theGatewaysOwnAuthenticationLimitIsReadAndCarriesNoScope() throws {
+        #expect(GatewayErrorCode(rawValue: "rate_limited") == .rateLimited)
+        let url = URL(string: "https://gateway.test/v1/apps/a/auth/token")!
+        let http = HTTPURLResponse(
+            url: url,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: ["Retry-After": "45"]
+        )!
+        let error = try #require(GatewayError(
+            response: http,
+            body: Data(#"""
+            {"error":{"code":"rate_limited","message":"too many",
+                      "data":{"scope":"app_auth_token"}}}
+            """#.utf8)
+        ))
+
+        #expect(error.code == .rateLimited)
+        #expect(error.retryAfter == 45)
+        #expect(error.isRetryable)
+        // `scope` names the endpoint here, not a limit the application set, so
+        // `limitScope` must not answer with it.
+        #expect(error.limitScope == nil)
+        #expect(error.monthlyRequestQuota == nil)
+    }
+
+    /// A refused registration must not cost an Apple attestation per call.
+    ///
+    /// Registering is where this bites hardest: the gateway refuses before a key
+    /// is stored, so without a hold the next call finds no key, generates one
+    /// and attests it with Apple all over again.
+    @Test
+    func aRateLimitedRegistrationIsWaitedOutWithoutAnotherAttestation() async throws {
+        let attestations = LockedCounter()
+        let requests = LockedCounter()
+        MockURLProtocol.handler = { request in
+            requests.increment()
+            if request.url!.path.hasSuffix("/auth/challenge") {
+                return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 429,
+                    httpVersion: nil,
+                    headerFields: ["Retry-After": "1"]
+                )!,
+                Data(#"""
+                {"error":{"code":"rate_limited","message":"too many",
+                          "data":{"scope":"app_auth_register"}}}
+                """#.utf8)
+            )
+        }
+        let store = MemoryCredentialStore()
+        let client = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .appAttest(issuerTokenProvider: { _ in "issuer" }),
+            attestProvider: MockAttestProvider(attestations: attestations),
+            credentialStore: store,
+            session: session()
+        )
+
+        var first: GatewayError?
+        do {
+            _ = try await client.gatewayAccessToken()
+        } catch let error as GatewayError {
+            first = error
+        }
+        #expect(first?.code == .rateLimited)
+        #expect(first?.retryAfter == 1)
+        let spent = requests.snapshot()
+        #expect(attestations.snapshot() == 1)
+        // Nothing was stored, which is exactly the state that would otherwise
+        // send the next call back to Apple for another key.
+        #expect(try store.appAttestKeyID(for: "test-app") == nil)
+
+        var second: GatewayError?
+        do {
+            _ = try await client.gatewayAccessToken()
+        } catch let error as GatewayError {
+            second = error
+        }
+        #expect(second?.code == .rateLimited)
+        // Re-raised with what is left of the window rather than what it began as.
+        #expect((second?.retryAfter ?? 0) > 0)
+        #expect((second?.retryAfter ?? .infinity) <= 1)
+        // The whole point: no second attestation, and no second request.
+        #expect(attestations.snapshot() == 1)
+        #expect(requests.snapshot() == spent)
+
+        // Once the window closes the client goes back to the gateway by itself.
+        try await Task.sleep(for: .milliseconds(1_200))
+        _ = try? await client.gatewayAccessToken()
+        #expect(requests.snapshot() > spent)
+    }
+
+    /// A refused token exchange is not a rejected key, so nothing about the key
+    /// may change: no registration, no attestation, and the stored id stays.
+    @Test
+    func aRateLimitedTokenExchangeDoesNotReRegisterTheKey() async throws {
+        let registerCalls = LockedCounter()
+        let attestations = LockedCounter()
+        let requests = LockedCounter()
+        MockURLProtocol.handler = { request in
+            requests.increment()
+            if request.url!.path.hasSuffix("/auth/challenge") {
+                return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+            }
+            if request.url!.path.hasSuffix("/auth/register") {
+                registerCalls.increment()
+                return response(request, status: 200, body: #"{"user_id":"user-1"}"#)
+            }
+            return (
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 429,
+                    httpVersion: nil,
+                    headerFields: ["Retry-After": "30"]
+                )!,
+                Data(#"""
+                {"error":{"code":"rate_limited","message":"too many",
+                          "data":{"scope":"app_auth_token"}}}
+                """#.utf8)
+            )
+        }
+        let store = MemoryCredentialStore(keyID: "key-in-good-standing")
+        let client = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .appAttest(issuerTokenProvider: { _ in "issuer" }),
+            attestProvider: MockAttestProvider(attestations: attestations),
+            credentialStore: store,
+            session: session()
+        )
+
+        var surfaced: GatewayError?
+        do {
+            _ = try await client.gatewayAccessToken()
+        } catch let error as GatewayError {
+            surfaced = error
+        }
+        #expect(surfaced?.code == .rateLimited)
+        #expect(surfaced?.retryAfter == 30)
+        #expect(registerCalls.snapshot() == 0)
+        #expect(attestations.snapshot() == 0)
+        #expect(try store.appAttestKeyID(for: "test-app") == "key-in-good-standing")
+
+        let spent = requests.snapshot()
+        _ = try? await client.gatewayAccessToken()
+        #expect(requests.snapshot() == spent)
+        #expect(registerCalls.snapshot() == 0)
     }
 }

@@ -53,6 +53,16 @@ public enum GatewayErrorCode: String, Codable, Sendable {
     /// Spend settles after a response completes, so this refuses the request
     /// after the one that crossed the budget, never the one that crossed it.
     case appBudgetExhausted = "app_budget_exhausted"
+    /// The gateway protecting its own `challenge`, `register` and `token`
+    /// endpoints against a flood, counted per application and network address.
+    ///
+    /// Nothing the application configured causes this and nothing it sets can
+    /// lift it, which is what separates it from ``appRateLimited``: there is no
+    /// scope to read, so ``GatewayError/limitScope`` stays `nil`.
+    /// ``GatewayError/retryAfter`` says how much of the window is left, and the
+    /// client waits that out by itself — a call made during it is refused
+    /// without reaching the network.
+    case rateLimited = "rate_limited"
     case modelNotAllowed = "model_not_allowed"
     case pathNotAllowed = "path_not_allowed"
     case payloadTooLarge = "payload_too_large"
