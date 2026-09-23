@@ -403,7 +403,7 @@ struct AppAIGatewayClientTests {
     @Test
     func expiredAccountLifecycleErrorsRequireOwnerAction() throws {
         for (wireCode, expected) in [
-            ("billing_trial_expired", GatewayErrorCode.billingTrialExpired),
+            ("unclaimed_access_expired", GatewayErrorCode.unclaimedAccessExpired),
             ("account_expired", GatewayErrorCode.accountExpired),
         ] {
             let error = try #require(GatewayError(
