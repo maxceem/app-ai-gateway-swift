@@ -29,11 +29,6 @@ public enum GatewayErrorCode: String, Codable, Sendable {
     /// ended. The account owner must claim it; retrying or replacing
     /// application credentials cannot help.
     case unclaimedAccessExpired = "unclaimed_access_expired"
-    /// The same refusal as ``unclaimedAccessExpired``, under the code earlier
-    /// gateways sent for it. Kept so an app built against this SDK still
-    /// recognises a gateway that has not been upgraded.
-    @available(*, deprecated, renamed: "unclaimedAccessExpired")
-    case billingTrialExpired = "billing_trial_expired"
     /// The unclaimed account passed its recovery deadline and cannot be used.
     case accountExpired = "account_expired"
     /// The organization used up the current scheduled request allowance its plan
