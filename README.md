@@ -25,7 +25,7 @@ let gateway = AppAIGatewayClient(
 
 var request = try await gateway.authorizedRequest(provider: .openai, providerPath: "v1/responses")
 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-request.httpBody = Data(#"{"model":"gpt-5.6","input":"Say hello."}"#.utf8)
+request.httpBody = Data(#"{"model":"gpt-5.6-sol","input":"Say hello."}"#.utf8)
 let (data, _) = try await URLSession.shared.data(for: request)
 ```
 
