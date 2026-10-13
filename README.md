@@ -58,12 +58,21 @@ for try await line in bytes.lines {
 
 If the gateway answers `401`, the helper discards its token, builds the
 request again with a fresh token and, where requests are signed, a fresh
-proof, and sends it once more. That recovers from an expired gateway token,
-from an App Attest key the gateway no longer knows (the fresh exchange
-re-registers it), and from an app switched to verify every request after the
-token was cached. A thrown error and every other status, `403` and `429`
-included, come back to you untouched. `authorizedRequest` remains available
-for apps that want to drive the retry themselves.
+proof, and sends it once more. That recovers from an expired gateway token or
+one that names no install (`401 auth_required`), and from an app switched to
+verify every request after the token was cached (`401 assertion_required`).
+It retries any `401` without reading the body, including one a provider
+returned through the proxy, such as for a provider key the provider rejected;
+that costs one extra token exchange and one repeated provider call, and
+nothing more. A thrown error and every other status, `403` and `429` included,
+come back to you untouched. `authorizedRequest` remains available for apps
+that want to drive the retry themselves.
+
+A `403 attest_failed` on a request is returned to you, never retried. Calling
+`discardAccessToken()` and building the request again helps when the gateway
+no longer knows the App Attest key, because the fresh exchange re-registers
+it. It does not help when the key's environment is no longer accepted, or
+when the request was changed after it was signed.
 
 In the App Attest modes the gateway decides whether requests are signed. Each
 app has a "Verify App Attest on" setting, and the token exchange answers with
@@ -104,8 +113,7 @@ the client's token was issued; the fresh exchange says so, and the rebuilt
 request is signed. A request you assemble from `gatewayAccessToken()` yourself
 gets it whenever the app verifies every request. If you send requests built
 with `authorizedRequest`, handle a `401` yourself: call `discardAccessToken()`
-and build the request again, once. A `403 attest_failed` that persists across
-a rebuilt request is cleared the same way.
+and build the request again, once.
 
 Requires iOS 16 or macOS 13. App Attest needs a real device.
 
