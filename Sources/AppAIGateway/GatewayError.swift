@@ -2,7 +2,16 @@ import Foundation
 
 public enum GatewayErrorCode: String, Codable, Sendable {
     case authRequired = "auth_required"
+    /// An App Attest proof was refused: at the token exchange, or on a request
+    /// whose `X-AppAttest-Proof` was malformed, stale (the device clock is more
+    /// than five minutes out), signed by a key the gateway no longer accepts,
+    /// signed over a different request, or replayed. The message says which.
     case attestFailed = "attest_failed"
+    /// A request with an App Attest gateway token arrived without the
+    /// `X-AppAttest-Proof` header. Every request needs one; this client adds it
+    /// in `AppAIGatewayClient.authorizedRequest(…)`,
+    /// so seeing it means a request was built some other way.
+    case assertionRequired = "assertion_required"
     case issuerTokenRejected = "issuer_token_rejected"
     /// The issuer token verified, but a required entitlement claim has not
     /// propagated yet. Re-authenticating cannot fix it — only waiting can.
@@ -45,7 +54,7 @@ public enum GatewayErrorCode: String, Codable, Sendable {
     /// Nothing to do with the plan allowance above: the operator chose this, and
     /// it is checked first, so a request refused here spent none of the
     /// organization's allowance. ``GatewayError/limitScope`` says whether the
-    /// limit was on this user alone or on the whole application, and
+    /// limit was on this install, this user, or the whole application, and
     /// ``GatewayError/retryAfter`` says how long the window has left.
     case appRateLimited = "app_rate_limited"
     /// A monthly spending budget this application's operator set is exhausted.
@@ -196,9 +205,12 @@ public struct GatewayError: Error, Sendable, LocalizedError {
         code == .issuerVerificationUnavailable || statusCode == 429 || (500..<600).contains(statusCode)
     }
 
-    /// Which of the application's own limits refused the call: `"user"` for one
-    /// set on this user alone, `"app"` for one shared by every user of the
-    /// application. `nil` for any rejection that is not an application limit.
+    /// Which of the application's own limits refused the call: `"install"` for
+    /// one counted for this install alone — an App Attest application counts
+    /// its request limits, and by default its budget, per install — `"user"`
+    /// for one set on this user alone, `"app"` for one shared by every user of
+    /// the application. `nil` for any rejection that is not an application
+    /// limit.
     ///
     /// Worth telling apart in a client: an `"app"` refusal is somebody else's
     /// traffic, so backing this user off does not help.

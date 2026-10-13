@@ -62,4 +62,12 @@ public struct SystemAppAttestProvider: AppAttestProviding {
 
 extension Data {
     var sha256: Data { Data(SHA256.hash(data: self)) }
+
+    /// Base64url without padding, the encoding every value in a request proof uses.
+    func base64URLEncodedString() -> String {
+        base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
 }
