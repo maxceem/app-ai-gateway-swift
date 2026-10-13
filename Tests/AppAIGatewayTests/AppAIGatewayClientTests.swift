@@ -1341,6 +1341,63 @@ struct AppAIGatewayClientTests {
         #expect(signatures.snapshot().last?.hash == expected)
     }
 
+    /// An exchange already in flight when the token is discarded — a
+    /// background refresh, say, answered under token_exchange — is not joined
+    /// by the rebuilt request: that one starts its own exchange, signs with
+    /// its token, and the overtaken result is never cached.
+    @Test
+    func aDiscardedTokenIsNotReplacedByAnExchangeAlreadyInFlight() async throws {
+        let tokens = LockedCounter()
+        // Assertion 1 is the overtaken exchange's, 2 the fresh exchange's,
+        // and 3 the rebuilt request's own proof.
+        let gates = AssertionGates(gated: [1, 2])
+        MockURLProtocol.handler = { request in
+            if request.url!.path.hasSuffix("/auth/challenge") {
+                return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+            }
+            let issued = tokens.increment()
+            let verifyOn = issued == 1 ? "token_exchange" : "every_request"
+            return response(
+                request,
+                status: 200,
+                body: "{\"access_token\":\"token-\(issued)\",\"expires_in\":3600,\"verify_on\":\"\(verifyOn)\"}"
+            )
+        }
+        let client = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .appAttestInstall,
+            attestProvider: GatedAttestProvider(gates: gates),
+            credentialStore: MemoryCredentialStore(keyID: "existing-key"),
+            session: session()
+        )
+        let overtaken = Task { try await client.gatewayAccessToken() }
+        #expect(try await gates.held(1))
+
+        await client.discardAccessToken()
+        let rebuilt = Task {
+            try await client.authorizedRequest(provider: .openai, providerPath: "v1/responses", body: Data("{}".utf8))
+        }
+        // A second exchange started rather than joining the first.
+        let started = try await gates.held(2)
+        #expect(started)
+
+        // The overtaken exchange finishes first, for the caller already on it.
+        gates.open(1)
+        #expect(try await overtaken.value == "token-1")
+        // Asked while the fresh exchange is still held: a cached token-1 would
+        // answer at once, and an uncached one joins the fresh exchange.
+        let probe = Task { try await client.gatewayAccessToken() }
+        gates.open(2)
+        #expect(try await probe.value == "token-2")
+        let request = try await rebuilt.value
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer token-2")
+        #expect(request.value(forHTTPHeaderField: "X-AppAttest-Proof") != nil)
+        // The cache holds the fresh token, and nothing exchanges again.
+        #expect(try await client.gatewayAccessToken() == "token-2")
+        #expect(tokens.snapshot() == 2)
+    }
+
     // MARK: withAuthorizedRequest
 
     /// A gateway whose tokens are numbered in the order it mints them, each
@@ -1536,6 +1593,59 @@ struct AppAIGatewayClientTests {
         for await event in stream { events.append(event) }
         #expect(events == ["event-2-a", "event-2-b"])
         #expect(calls.snapshot() == 2)
+    }
+}
+
+/// An App Attest provider whose numbered `generateAssertion` calls wait until
+/// the test opens them, to hold a token exchange part way through.
+struct GatedAttestProvider: AppAttestProviding {
+    let gates: AssertionGates
+    var isSupported: Bool { true }
+    func generateKey() async throws -> String { "generated-key" }
+    func attestKey(_ keyID: String, clientDataHash: Data) async throws -> Data { Data("attestation".utf8) }
+    func generateAssertion(_ keyID: String, clientDataHash: Data) async throws -> Data {
+        await gates.pass()
+        return Data("assertion".utf8)
+    }
+}
+
+final class AssertionGates: @unchecked Sendable {
+    private let lock = NSLock()
+    private let gated: Set<Int>
+    private var calls = 0
+    private var opened: Set<Int> = []
+    private var waiting: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    /// Calls numbered in `gated`, from 1, wait for `open`; the rest pass.
+    init(gated: Set<Int>) { self.gated = gated }
+
+    func pass() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow: Bool = lock.withLock {
+                calls += 1
+                guard gated.contains(calls), !opened.contains(calls) else { return true }
+                waiting[calls] = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
+    func open(_ call: Int) {
+        let continuation = lock.withLock {
+            opened.insert(call)
+            return waiting.removeValue(forKey: call)
+        }
+        continuation?.resume()
+    }
+
+    /// Waits, for a second at most, until call `call` is held at its gate.
+    func held(_ call: Int) async throws -> Bool {
+        for _ in 0..<1000 {
+            if lock.withLock({ waiting[call] != nil }) { return true }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        return false
     }
 }
 
