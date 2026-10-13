@@ -10,9 +10,11 @@ public enum GatewayErrorCode: String, Codable, Sendable {
     /// A request with an App Attest gateway token arrived without the
     /// `X-AppAttest-Proof` header, on an app that verifies App Attest on every
     /// request. This client signs whenever the token it holds was issued under
-    /// that setting, so seeing it means the application was switched to verify
-    /// every request after the cached token was issued, under
-    /// `verify_on: token_exchange`. Call
+    /// that setting, so a request built with `authorizedRequest`, its headers
+    /// kept, sees it only when the application was switched to verify every
+    /// request after the cached token was issued under
+    /// `verify_on: token_exchange`. A request assembled from
+    /// `gatewayAccessToken()` by hand sees it whenever that setting is on. Call
     /// `AppAIGatewayClient.discardAccessToken()` and build the request again
     /// with `authorizedRequest(…)`, once: the fresh exchange answers
     /// `every_request`, and the rebuilt request carries a proof.

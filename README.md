@@ -63,9 +63,12 @@ a signed request's URL breaks its proof.
 to assign to `httpBody` into the call. API-key modes are unchanged and send no
 proof. If your app sends a request and is refused with `attest_failed`,
 `auth_required` or `assertion_required`, call `discardAccessToken()` and build
-the request again with `authorizedRequest`, once. `assertion_required` means
-the app was switched to verify every request after the client's token was
-issued; the fresh exchange says so, and the rebuilt request is signed.
+the request again with `authorizedRequest`, once. On a request built with
+`authorizedRequest` and sent with its headers intact, `assertion_required`
+means the app was switched to verify every request after the client's token
+was issued; the fresh exchange says so, and the rebuilt request is signed. A
+request you assemble from `gatewayAccessToken()` yourself gets it whenever
+the app verifies every request.
 
 Requires iOS 16 or macOS 13. App Attest needs a real device.
 
