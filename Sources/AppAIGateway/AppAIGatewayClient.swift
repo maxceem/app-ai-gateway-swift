@@ -63,14 +63,25 @@ public actor AppAIGatewayClient {
         let value: String
         let refreshAt: Date
         /// The App Attest key the token is bound to, in the App Attest modes:
-        /// every request sent with it must be signed by this key.
+        /// the key that signs the requests it is sent with, where any are.
         let keyID: String?
+        /// Whether every request sent with this token carries an
+        /// `X-AppAttest-Proof`: only when the gateway answered the exchange
+        /// with `verify_on: "every_request"`.
+        let signsEveryRequest: Bool
     }
 
     private struct TokenResponse: Decodable {
         let access_token: String
         let expires_in: TimeInterval
+        /// When the gateway verifies the install's App Attest assertion:
+        /// `every_request` or `token_exchange`. Absent from an older gateway,
+        /// which verifies it on the exchange alone, and from API-key apps.
+        let verify_on: String?
     }
+
+    /// The `verify_on` value under which every request is signed.
+    static let verifyOnEveryRequest = "every_request"
 
     private struct ChallengeResponse: Decodable {
         let challenge: String
@@ -189,13 +200,16 @@ public actor AppAIGatewayClient {
 
     /// A request to a provider through the gateway, ready to send.
     ///
-    /// The returned request carries `body` and, when given, `contentType`. In
-    /// the App Attest modes it also carries `X-AppAttest-Proof`: an assertion
-    /// the device's App Attest key signed over exactly this method, URL, body
-    /// and token. Send it as it is. Changing the body or the URL afterwards
-    /// invalidates the proof, and the gateway refuses the request with
-    /// `attest_failed`; headers other than `Authorization` may be added freely.
-    /// Each proof is good for one request: build a new one per send.
+    /// The returned request carries `body` and, when given, `contentType`.
+    /// When the app verifies App Attest on every request — the gateway says
+    /// so in its token response, as `verify_on: "every_request"` — it also
+    /// carries `X-AppAttest-Proof`: an assertion the device's App Attest key
+    /// signed over exactly this method, URL, body and token. Send it as it is.
+    /// Changing the body or the URL afterwards invalidates the proof, and the
+    /// gateway refuses the request with `attest_failed`; headers other than
+    /// `Authorization` may be added freely. Each proof is good for one
+    /// request: build a new one per send. When the app verifies App Attest on
+    /// the token exchange instead, the request carries the token alone.
     public func authorizedRequest(
         provider: String,
         providerPath: String,
@@ -212,8 +226,8 @@ public actor AppAIGatewayClient {
     }
 
     /// A request to a provider through the gateway, signed over its body and
-    /// URL in the App Attest modes: pass the body here, and change neither
-    /// afterwards. See the `provider: String` form.
+    /// URL where the app verifies App Attest on every request: pass the body
+    /// here, and change neither afterwards. See the `provider: String` form.
     public func authorizedRequest(
         provider: ProviderSlug,
         providerPath: String,
@@ -238,8 +252,8 @@ public actor AppAIGatewayClient {
     }
 
     /// A request to a custom endpoint, ready to send. Signed over its body and
-    /// URL in the App Attest modes exactly as the provider form is: pass the
-    /// body here, and change neither afterwards.
+    /// URL exactly as the provider form is, where the app verifies App Attest
+    /// on every request: pass the body here, and change neither afterwards.
     public func authorizedRequest(
         endpointSlug: String,
         method: String = "POST",
@@ -262,11 +276,12 @@ public actor AppAIGatewayClient {
 
     /// A `GET /v1/apps/{app}/me` request, ready to send: the limits that apply
     /// to the caller, its requests today, the month's spend against its
-    /// budget, and whether it is blocked. Signed in the App Attest modes like
-    /// every other gateway request, with the same key recovery, so build it
-    /// here rather than from a URL of your own: an unsigned request is refused
-    /// with `401 assertion_required`, and a signed request whose URL was
-    /// changed afterwards with `403 attest_failed`.
+    /// budget, and whether it is blocked. Signed like every other gateway
+    /// request where the app verifies App Attest on every request, with the
+    /// same key recovery, so build it here rather than from a URL of your own:
+    /// there a request without a proof is refused with `401 assertion_required`, and
+    /// a signed request whose URL was changed afterwards with
+    /// `403 attest_failed`.
     public func currentUserRequest() async throws -> URLRequest {
         try await authorizedRequest(url: currentUserURL(), method: "GET", body: nil, contentType: nil)
     }
@@ -281,7 +296,9 @@ public actor AppAIGatewayClient {
         refreshTask = nil
     }
 
-    private var signsRequests: Bool {
+    /// Whether this client exchanges an App Attest assertion for its token,
+    /// and so may have to sign the requests it sends with it.
+    private var usesAppAttest: Bool {
         switch authMode {
         case .appAttest, .appAttestInstall: return true
         case .apiKey: return false
@@ -307,13 +324,20 @@ public actor AppAIGatewayClient {
             request.setValue(endUserId, forHTTPHeaderField: endUserHeader)
         }
         request.setValue(Self.appVersion, forHTTPHeaderField: "X-App-Version")
-        guard signsRequests else {
+        guard usesAppAttest else {
             request.setValue("Bearer \(try await gatewayAccessToken())", forHTTPHeaderField: "Authorization")
             return request
         }
-        _ = try await gatewayAccessToken()
+        let value = try await gatewayAccessToken()
         guard let token = accessToken else {
             throw GatewayError(code: .attestFailed, message: "No gateway token to sign the request with", statusCode: 0)
+        }
+        // The app verifies App Attest on the token exchange, or the gateway is
+        // older than `verify_on`: the assertion was checked when the token was
+        // minted, and the token alone is the request's credential.
+        guard token.signsEveryRequest else {
+            request.setValue("Bearer \(value)", forHTTPHeaderField: "Authorization")
+            return request
         }
         do {
             return try await signed(request, with: token)
@@ -327,6 +351,12 @@ public actor AppAIGatewayClient {
             _ = try await refreshGatewayAccessToken()
             guard let replacement = accessToken else {
                 throw GatewayError(code: .attestFailed, message: "No gateway token to sign the request with", statusCode: 0)
+            }
+            // The replacement's answer decides, should the app have changed
+            // its setting in between.
+            guard replacement.signsEveryRequest else {
+                request.setValue("Bearer \(replacement.value)", forHTTPHeaderField: "Authorization")
+                return request
             }
             do {
                 return try await signed(request, with: replacement)
@@ -507,7 +537,8 @@ public actor AppAIGatewayClient {
             let token = AccessToken(
                 value: response.access_token,
                 refreshAt: now.addingTimeInterval(Self.refreshDelay(for: response.expires_in)),
-                keyID: keyID
+                keyID: keyID,
+                signsEveryRequest: keyID != nil && response.verify_on == Self.verifyOnEveryRequest
             )
             accessToken = token
             scheduleRefresh(for: token)
@@ -536,8 +567,8 @@ public actor AppAIGatewayClient {
     }
 
     /// The token, and the key it is bound to: the gateway mints it for the
-    /// install whose key signed the exchange, and refuses every request it is
-    /// sent with that another key signed.
+    /// install whose key signed the exchange, and where it verifies every
+    /// request, refuses each one that another key signed.
     private func productionExchange(forceIssuerRefresh: Bool) async throws -> (TokenResponse, String) {
         guard attestProvider.isSupported else {
             throw GatewayError(code: .attestFailed, message: "App Attest is unavailable on this device", statusCode: 0)

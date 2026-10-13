@@ -949,7 +949,7 @@ struct AppAIGatewayClientTests {
             if request.url!.path.hasSuffix("/auth/challenge") {
                 return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
             }
-            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600}"#)
+            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600,"verify_on":"every_request"}"#)
         }
         let client = AppAIGatewayClient(
             appID: "test-app",
@@ -998,10 +998,46 @@ struct AppAIGatewayClientTests {
         #expect(second.value(forHTTPHeaderField: "X-AppAttest-Proof") != proof)
     }
 
+    /// An app that verifies App Attest on the token exchange, and an older
+    /// gateway that says nothing about it: the token alone, nothing signed.
+    @Test
+    func requestsCarryOnlyTheTokenUnlessTheGatewayVerifiesEveryRequest() async throws {
+        for tokenBody in [
+            #"{"access_token":"gateway-token","expires_in":3600,"verify_on":"token_exchange"}"#,
+            #"{"access_token":"gateway-token","expires_in":3600}"#,
+        ] {
+            let signatures = SignatureLog()
+            MockURLProtocol.handler = { request in
+                if request.url!.path.hasSuffix("/auth/challenge") {
+                    return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+                }
+                return response(request, status: 200, body: tokenBody)
+            }
+            let client = AppAIGatewayClient(
+                appID: "test-app",
+                baseURL: URL(string: "https://gateway.test")!,
+                authMode: .appAttestInstall,
+                attestProvider: MockAttestProvider(signatures: signatures),
+                credentialStore: MemoryCredentialStore(keyID: "existing-key"),
+                session: session()
+            )
+            let body = Data("{}".utf8)
+            let request = try await client.authorizedRequest(provider: .openai, providerPath: "v1/responses", body: body)
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer gateway-token")
+            #expect(request.value(forHTTPHeaderField: "X-AppAttest-Proof") == nil)
+            #expect(request.httpBody == body)
+            let me = try await client.currentUserRequest()
+            #expect(me.value(forHTTPHeaderField: "Authorization") == "Bearer gateway-token")
+            #expect(me.value(forHTTPHeaderField: "X-AppAttest-Proof") == nil)
+            // The exchange's own assertion is the only one the key signed.
+            #expect(signatures.snapshot().count == 1)
+        }
+    }
+
     @Test
     func apiKeyModesSendNoProof() async throws {
         MockURLProtocol.handler = { request in
-            response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600}"#)
+            response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600,"verify_on":"every_request"}"#)
         }
         for mode in [
             GatewayAuthMode.apiKey(key: "agw_machine-key"),
@@ -1039,7 +1075,7 @@ struct AppAIGatewayClientTests {
                 return response(request, status: 200, body: #"{"user_id":"generated-key"}"#)
             }
             let issued = tokens.increment()
-            return response(request, status: 200, body: "{\"access_token\":\"token-\(issued)\",\"expires_in\":3600}")
+            return response(request, status: 200, body: "{\"access_token\":\"token-\(issued)\",\"expires_in\":3600,\"verify_on\":\"every_request\"}")
         }
         let store = MemoryCredentialStore(keyID: "existing-key")
         let client = AppAIGatewayClient(
@@ -1080,7 +1116,7 @@ struct AppAIGatewayClientTests {
             if request.url!.path.hasSuffix("/auth/challenge") {
                 return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
             }
-            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600}"#)
+            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600,"verify_on":"every_request"}"#)
         }
         let client = AppAIGatewayClient(
             appID: "test-app",
@@ -1126,7 +1162,7 @@ struct AppAIGatewayClientTests {
                 return response(request, status: 200, body: #"{"user_id":"generated-key"}"#)
             }
             let issued = tokens.increment()
-            return response(request, status: 200, body: "{\"access_token\":\"token-\(issued)\",\"expires_in\":3600}")
+            return response(request, status: 200, body: "{\"access_token\":\"token-\(issued)\",\"expires_in\":3600,\"verify_on\":\"every_request\"}")
         }
         let client = AppAIGatewayClient(
             appID: "test-app",
@@ -1235,7 +1271,7 @@ struct AppAIGatewayClientTests {
             if request.url!.path.hasSuffix("/auth/challenge") {
                 return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
             }
-            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600}"#)
+            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600,"verify_on":"every_request"}"#)
         }
         let client = AppAIGatewayClient(
             appID: "test-app",

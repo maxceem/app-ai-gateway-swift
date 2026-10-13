@@ -32,25 +32,36 @@ let request = try await gateway.authorizedRequest(
 let (data, _) = try await URLSession.shared.data(for: request)
 ```
 
-In the App Attest modes every request is signed: `authorizedRequest` adds an
-`X-AppAttest-Proof` header, an assertion the device's App Attest key made over
-exactly that method, URL, body and gateway token. Pass the body to
-`authorizedRequest` and send the request as it comes back. Changing the body
-or the URL afterwards invalidates the proof, and the gateway refuses the
-request with `attest_failed`. Other headers may be added. Build a new request
-for every send: each proof is accepted once.
+In the App Attest modes the gateway decides whether requests are signed. Each
+app has a "Verify App Attest on" setting, and the token exchange answers with
+it as `verify_on`:
+
+- `every_request` (the default for new apps): `authorizedRequest` adds an
+  `X-AppAttest-Proof` header, an assertion the device's App Attest key made
+  over exactly that method, URL, body and gateway token. Pass the body to
+  `authorizedRequest` and send the request as it comes back. Changing the body
+  or the URL afterwards invalidates the proof, and the gateway refuses the
+  request with `attest_failed`. Other headers may be added. Build a new
+  request for every send: each proof is accepted once.
+- `token_exchange`: the assertion is checked once per hourly token, and
+  requests carry only the token. A gateway that sends no `verify_on` is
+  treated the same way.
+
+Build requests with `authorizedRequest` in either case, so a change of the
+setting needs no change in your app.
 
 To show the caller where they stand against your app's limits, send
-`currentUserRequest()`, a signed `GET /v1/apps/{app}/me`. Build it there
-rather than from a URL of your own: an unsigned request is refused with
-`assertion_required`, and editing a signed request's URL breaks its proof.
+`currentUserRequest()`, a `GET /v1/apps/{app}/me` signed the same way. Build it
+there rather than from a URL of your own: on an app that verifies every
+request, a request without a proof is refused with `assertion_required`, and editing
+a signed request's URL breaks its proof.
 
 ### Upgrading from 1.x
 
-2.0 is required by gateways that verify every request. `authorizedRequest`
-now takes `body:` and `contentType:`; move a body you used to assign to
-`httpBody` into the call. API-key modes are unchanged and send no proof. If
-your app sends a request and is refused with `attest_failed` or
+2.0 is required by apps that verify App Attest on every request.
+`authorizedRequest` now takes `body:` and `contentType:`; move a body you used
+to assign to `httpBody` into the call. API-key modes are unchanged and send no
+proof. If your app sends a request and is refused with `attest_failed` or
 `auth_required`, call `discardAccessToken()` and build the request again.
 
 Requires iOS 16 or macOS 13. App Attest needs a real device.

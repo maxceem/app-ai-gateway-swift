@@ -3,14 +3,15 @@ import Foundation
 public enum GatewayErrorCode: String, Codable, Sendable {
     case authRequired = "auth_required"
     /// An App Attest proof was refused: at the token exchange, or on a request
-    /// whose `X-AppAttest-Proof` was malformed, stale (the device clock is more
-    /// than five minutes out), signed by a key the gateway no longer accepts,
-    /// signed over a different request, or replayed. The message says which.
+    /// whose `X-AppAttest-Proof` was malformed, signed by a key the gateway no
+    /// longer accepts, signed over a different request, or replayed. The
+    /// message says which.
     case attestFailed = "attest_failed"
     /// A request with an App Attest gateway token arrived without the
-    /// `X-AppAttest-Proof` header. Every request needs one; this client adds it
-    /// in `AppAIGatewayClient.authorizedRequest(…)`,
-    /// so seeing it means a request was built some other way.
+    /// `X-AppAttest-Proof` header, on an app that verifies App Attest on every
+    /// request. This client adds it in `AppAIGatewayClient.authorizedRequest(…)`
+    /// whenever the gateway's token response asks for it, so seeing it means a
+    /// request was built some other way.
     case assertionRequired = "assertion_required"
     case issuerTokenRejected = "issuer_token_rejected"
     /// The issuer token verified, but a required entitlement claim has not
