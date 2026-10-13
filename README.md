@@ -61,8 +61,11 @@ a signed request's URL breaks its proof.
 2.0 is required by apps that verify App Attest on every request.
 `authorizedRequest` now takes `body:` and `contentType:`; move a body you used
 to assign to `httpBody` into the call. API-key modes are unchanged and send no
-proof. If your app sends a request and is refused with `attest_failed` or
-`auth_required`, call `discardAccessToken()` and build the request again.
+proof. If your app sends a request and is refused with `attest_failed`,
+`auth_required` or `assertion_required`, call `discardAccessToken()` and build
+the request again with `authorizedRequest`, once. `assertion_required` means
+the app was switched to verify every request after the client's token was
+issued; the fresh exchange says so, and the rebuilt request is signed.
 
 Requires iOS 16 or macOS 13. App Attest needs a real device.
 

@@ -1034,6 +1034,52 @@ struct AppAIGatewayClientTests {
         }
     }
 
+    /// The app is switched to verify every request while this client holds a
+    /// token issued under token_exchange: its requests go unsigned and are
+    /// refused with `assertion_required`, until the app discards the token and
+    /// rebuilds the request, which re-exchanges and signs.
+    @Test
+    func aDiscardedTokenPicksUpASwitchToEveryRequest() async throws {
+        let signatures = SignatureLog()
+        let tokens = LockedCounter()
+        MockURLProtocol.handler = { request in
+            if request.url!.path.hasSuffix("/auth/challenge") {
+                return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+            }
+            let issued = tokens.increment()
+            let verifyOn = issued == 1 ? "token_exchange" : "every_request"
+            return response(
+                request,
+                status: 200,
+                body: "{\"access_token\":\"token-\(issued)\",\"expires_in\":3600,\"verify_on\":\"\(verifyOn)\"}"
+            )
+        }
+        let client = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .appAttestInstall,
+            attestProvider: MockAttestProvider(signatures: signatures),
+            credentialStore: MemoryCredentialStore(keyID: "existing-key"),
+            session: session()
+        )
+        let body = Data("{}".utf8)
+        let unsigned = try await client.authorizedRequest(provider: .openai, providerPath: "v1/responses", body: body)
+        #expect(unsigned.value(forHTTPHeaderField: "Authorization") == "Bearer token-1")
+        #expect(unsigned.value(forHTTPHeaderField: "X-AppAttest-Proof") == nil)
+        // Still cached: nothing changes until the app discards the token.
+        let stillUnsigned = try await client.authorizedRequest(provider: .openai, providerPath: "v1/responses", body: body)
+        #expect(stillUnsigned.value(forHTTPHeaderField: "X-AppAttest-Proof") == nil)
+        #expect(tokens.snapshot() == 1)
+
+        // The gateway refused it with assertion_required; the app recovers.
+        await client.discardAccessToken()
+        let signed = try await client.authorizedRequest(provider: .openai, providerPath: "v1/responses", body: body)
+        #expect(tokens.snapshot() == 2)
+        #expect(signed.value(forHTTPHeaderField: "Authorization") == "Bearer token-2")
+        #expect(signed.value(forHTTPHeaderField: "X-AppAttest-Proof") != nil)
+        #expect(signatures.snapshot().last?.keyID == "existing-key")
+    }
+
     @Test
     func apiKeyModesSendNoProof() async throws {
         MockURLProtocol.handler = { request in

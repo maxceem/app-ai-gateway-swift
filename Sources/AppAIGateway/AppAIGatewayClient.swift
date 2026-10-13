@@ -288,8 +288,11 @@ public actor AppAIGatewayClient {
 
     /// Forgets the gateway token this client holds, so the next request runs
     /// the exchange again. For an app that sent a request itself and was
-    /// refused with `auth_required` or `attest_failed`: a fresh exchange
-    /// re-registers the App Attest key if the gateway no longer knows it.
+    /// refused with `auth_required`, `attest_failed` or `assertion_required`:
+    /// a fresh exchange re-registers the App Attest key if the gateway no
+    /// longer knows it, and picks up the app's current `verify_on`, so a
+    /// request rebuilt after an app was switched to verify every request is
+    /// signed. Rebuild the request once; a second refusal is real.
     public func discardAccessToken() {
         accessToken = nil
         refreshTask?.cancel()
