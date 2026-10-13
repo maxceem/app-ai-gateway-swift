@@ -294,7 +294,9 @@ public actor AppAIGatewayClient {
         body: Data?,
         contentType: String?
     ) async throws -> URLRequest {
-        var request = URLRequest(url: url)
+        // Sent exactly as the gateway's URL parser will read it, so the path
+        // and query this client signs are the ones the gateway rebuilds.
+        var request = URLRequest(url: Self.whatwgNormalized(url))
         request.httpMethod = method
         request.httpBody = body
         if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
@@ -400,15 +402,77 @@ public actor AppAIGatewayClient {
         return Data(lines.joined(separator: "\n").utf8)
     }
 
-    /// The URL's path and query exactly as they will be sent, percent-encoding
-    /// included; an empty query is no query.
+    /// The URL's path and query as the gateway reads them: Foundation's
+    /// percent-encoded form, normalized the way the WHATWG URL parser
+    /// normalizes it. An empty query is no query.
     static func pathAndQuery(of url: URL) -> String {
         let components = URLComponents(url: url, resolvingAgainstBaseURL: true)
-        let path = components?.percentEncodedPath ?? url.path
-        guard let query = components?.percentEncodedQuery, !query.isEmpty else {
-            return path.isEmpty ? "/" : path
+        let path = whatwgPath(components?.percentEncodedPath ?? url.path)
+        guard let query = components?.percentEncodedQuery, !query.isEmpty else { return path }
+        return "\(path)?\(whatwgQuery(query))"
+    }
+
+    /// The URL rewritten so its path and query are exactly what the WHATWG URL
+    /// parser makes of them: the gateway's runtime reads every request that
+    /// way, and Foundation's own encoding differs on a few bytes — `'` in a
+    /// query, `^` in a path, dot segments. Returned unchanged if it cannot be
+    /// rebuilt.
+    static func whatwgNormalized(_ url: URL) -> URL {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return url }
+        components.percentEncodedPath = ""
+        components.percentEncodedQuery = nil
+        components.fragment = nil
+        guard let origin = components.string else { return url }
+        return URL(string: origin + pathAndQuery(of: url)) ?? url
+    }
+
+    /// The WHATWG path percent-encode set beyond controls and non-ASCII:
+    /// space, `"`, `#`, `<`, `>`, `?`, `^`, `` ` ``, `{` and `}`.
+    private static let pathEncodeSet: Set<UInt8> = [0x20, 0x22, 0x23, 0x3C, 0x3E, 0x3F, 0x5E, 0x60, 0x7B, 0x7D]
+    /// The WHATWG special-scheme query percent-encode set beyond controls and
+    /// non-ASCII: space, `"`, `#`, `<`, `>` and `'`.
+    private static let queryEncodeSet: Set<UInt8> = [0x20, 0x22, 0x23, 0x3C, 0x3E, 0x27]
+
+    /// Percent-encodes what the WHATWG parser would, byte by byte. `%` is never
+    /// encoded, so an escape already present — valid or not — is left as is.
+    private static func whatwgEncode(_ value: Substring, extra: Set<UInt8>) -> String {
+        var output = ""
+        for byte in value.utf8 {
+            if byte < 0x20 || byte > 0x7E || extra.contains(byte) {
+                output += String(format: "%%%02X", byte)
+            } else {
+                output.unicodeScalars.append(Unicode.Scalar(byte))
+            }
         }
-        return "\(path.isEmpty ? "/" : path)?\(query)"
+        return output
+    }
+
+    /// A path as the WHATWG parser leaves it for an `https` URL: `\` read as
+    /// `/`, `.` and `..` segments (`%2e` spelled or not) resolved, and the
+    /// path percent-encode set applied to what remains.
+    static func whatwgPath(_ path: String) -> String {
+        var segments = path.replacingOccurrences(of: "\\", with: "/")
+            .split(separator: "/", omittingEmptySubsequences: false)
+        if segments.first == "" { segments.removeFirst() }
+        var output: [String] = []
+        for (index, segment) in segments.enumerated() {
+            let lowered = segment.lowercased()
+            let isLast = index == segments.count - 1
+            if lowered == "." || lowered == "%2e" {
+                if isLast { output.append("") }
+            } else if ["..", ".%2e", "%2e.", "%2e%2e"].contains(lowered) {
+                if !output.isEmpty { output.removeLast() }
+                if isLast { output.append("") }
+            } else {
+                output.append(whatwgEncode(segment, extra: pathEncodeSet))
+            }
+        }
+        return "/" + output.joined(separator: "/")
+    }
+
+    /// A query as the WHATWG parser leaves it for an `https` URL.
+    static func whatwgQuery(_ query: String) -> String {
+        whatwgEncode(query[...], extra: queryEncodeSet)
     }
 
     /// `v1.<timestamp>.<nonce>.<assertion>`, the value of `X-AppAttest-Proof`.

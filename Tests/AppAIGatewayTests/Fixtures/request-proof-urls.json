@@ -1,0 +1,61 @@
+{
+  "fixed": {
+    "appId": "a",
+    "method": "POST",
+    "body": "{}",
+    "token": "token-value",
+    "timestamp": "1767225600",
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAA"
+  },
+  "cases": [
+    {
+      "name": "a literal apostrophe in the query",
+      "path": "/v1/apps/a/me",
+      "query": "q=it's",
+      "pathAndQuery": "/v1/apps/a/me?q=it%27s",
+      "clientData": "appaigateway-request-v1\na\nPOST\n/v1/apps/a/me?q=it%27s\nRBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o\n5sAqV0LqnU3liOubnee-1D3BcBFVIYa-0-mLLFlY_0o\n1767225600\nAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "existing percent escapes, valid and not",
+      "path": "/v1/apps/a/proxy/openai/v1/files/a%2Fb",
+      "query": "x=%41%zz&y=%2e",
+      "pathAndQuery": "/v1/apps/a/proxy/openai/v1/files/a%2Fb?x=%41%zz&y=%2e",
+      "clientData": "appaigateway-request-v1\na\nPOST\n/v1/apps/a/proxy/openai/v1/files/a%2Fb?x=%41%zz&y=%2e\nRBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o\n5sAqV0LqnU3liOubnee-1D3BcBFVIYa-0-mLLFlY_0o\n1767225600\nAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "a Unicode character",
+      "path": "/v1/apps/a/proxy/openai/v1/café",
+      "query": "q=ü",
+      "pathAndQuery": "/v1/apps/a/proxy/openai/v1/caf%C3%A9?q=%C3%BC",
+      "clientData": "appaigateway-request-v1\na\nPOST\n/v1/apps/a/proxy/openai/v1/caf%C3%A9?q=%C3%BC\nRBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o\n5sAqV0LqnU3liOubnee-1D3BcBFVIYa-0-mLLFlY_0o\n1767225600\nAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "a space",
+      "path": "/v1/apps/a/proxy/my provider/v1",
+      "query": "q=a b",
+      "pathAndQuery": "/v1/apps/a/proxy/my%20provider/v1?q=a%20b",
+      "clientData": "appaigateway-request-v1\na\nPOST\n/v1/apps/a/proxy/my%20provider/v1?q=a%20b\nRBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o\n5sAqV0LqnU3liOubnee-1D3BcBFVIYa-0-mLLFlY_0o\n1767225600\nAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "dot segments, plain and encoded",
+      "path": "/v1/apps/a/proxy/openai/./v1/../v1/%2E/responses",
+      "query": null,
+      "pathAndQuery": "/v1/apps/a/proxy/openai/v1/responses",
+      "clientData": "appaigateway-request-v1\na\nPOST\n/v1/apps/a/proxy/openai/v1/responses\nRBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o\n5sAqV0LqnU3liOubnee-1D3BcBFVIYa-0-mLLFlY_0o\n1767225600\nAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "a trailing dot-dot segment",
+      "path": "/v1/apps/a/proxy/openai/v1/..",
+      "query": null,
+      "pathAndQuery": "/v1/apps/a/proxy/openai/",
+      "clientData": "appaigateway-request-v1\na\nPOST\n/v1/apps/a/proxy/openai/\nRBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o\n5sAqV0LqnU3liOubnee-1D3BcBFVIYa-0-mLLFlY_0o\n1767225600\nAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "the rest of each percent-encode set",
+      "path": "/v1/apps/a/proxy/x/`{}\"<>'|^[]",
+      "query": "a=`{}\"<>|^[]",
+      "pathAndQuery": "/v1/apps/a/proxy/x/%60%7B%7D%22%3C%3E'|%5E[]?a=`{}%22%3C%3E|^[]",
+      "clientData": "appaigateway-request-v1\na\nPOST\n/v1/apps/a/proxy/x/%60%7B%7D%22%3C%3E'|%5E[]?a=`{}%22%3C%3E|^[]\nRBNvo1WzZ4oRRq0W9-hknpT7T8If536DEMBg9hyq_4o\n5sAqV0LqnU3liOubnee-1D3BcBFVIYa-0-mLLFlY_0o\n1767225600\nAAAAAAAAAAAAAAAAAAAAAA"
+    }
+  ]
+}

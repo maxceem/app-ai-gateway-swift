@@ -12,6 +12,11 @@ let package = Package(
             name: "AppAIGateway",
             linkerSettings: [.linkedFramework("Security")]
         ),
-        .testTarget(name: "AppAIGatewayTests", dependencies: ["AppAIGateway"]),
+        .testTarget(
+            name: "AppAIGatewayTests",
+            dependencies: ["AppAIGateway"],
+            // Read by path, not bundled: the gateway's own tests read the same file.
+            exclude: ["Fixtures"]
+        ),
     ]
 )

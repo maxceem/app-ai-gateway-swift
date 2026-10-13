@@ -1159,4 +1159,103 @@ struct AppAIGatewayClientTests {
         #expect(request.value(forHTTPHeaderField: "X-End-User-ID") == "customer-42")
         #expect(request.value(forHTTPHeaderField: "X-AppAttest-Proof") == nil)
     }
+
+    // MARK: The URL as the gateway reads it
+
+    private struct URLGolden: Decodable {
+        struct Fixed: Decodable {
+            let appId: String
+            let method: String
+            let body: String
+            let token: String
+            let timestamp: String
+            let nonce: String
+        }
+        struct Case: Decodable {
+            let name: String
+            let path: String
+            let query: String?
+            let pathAndQuery: String
+            let clientData: String
+        }
+        let fixed: Fixed
+        let cases: [Case]
+    }
+
+    /// The same file `test/request-proof.test.ts` reads, where each
+    /// `pathAndQuery` is checked against the gateway runtime's own URL parser.
+    private func urlGolden() throws -> URLGolden {
+        let file = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appending(path: "Fixtures/request-proof-urls.json")
+        return try JSONDecoder().decode(URLGolden.self, from: Data(contentsOf: file))
+    }
+
+    @Test
+    func pathsAndQueriesAreSignedAsTheGatewayReadsThem() throws {
+        let golden = try urlGolden()
+        #expect(golden.cases.count >= 5)
+        for fixture in golden.cases {
+            let path = AppAIGatewayClient.whatwgPath(fixture.path)
+            let pathAndQuery = fixture.query.map { "\(path)?\(AppAIGatewayClient.whatwgQuery($0))" } ?? path
+            #expect(pathAndQuery == fixture.pathAndQuery, "\(fixture.name)")
+            let clientData = AppAIGatewayClient.requestClientData(
+                appID: golden.fixed.appId,
+                method: golden.fixed.method,
+                pathAndQuery: pathAndQuery,
+                body: Data(golden.fixed.body.utf8),
+                token: golden.fixed.token,
+                timestamp: Int(golden.fixed.timestamp)!,
+                nonce: golden.fixed.nonce
+            )
+            #expect(String(data: clientData, encoding: .utf8) == fixture.clientData, "\(fixture.name)")
+            // Normalizing what is already normal changes nothing, so signing
+            // the URL that is sent signs the same bytes again.
+            #expect(AppAIGatewayClient.whatwgPath(path) == path, "\(fixture.name)")
+        }
+    }
+
+    /// The URL that is sent is the normalized one, not only the string that
+    /// is signed: a query with an apostrophe travels as `%27`, which is what
+    /// the gateway's parser would have made of it anyway.
+    @Test
+    func theSentURLIsTheNormalizedOne() throws {
+        let url = try #require(URL(string: "https://gateway.test/base/v1/apps/a/proxy/openai/./v1/x/../responses?q=it's"))
+        let normalized = AppAIGatewayClient.whatwgNormalized(url)
+        #expect(normalized.absoluteString == "https://gateway.test/base/v1/apps/a/proxy/openai/v1/responses?q=it%27s")
+        #expect(AppAIGatewayClient.pathAndQuery(of: normalized) == "/base/v1/apps/a/proxy/openai/v1/responses?q=it%27s")
+        let withPort = try #require(URL(string: "http://localhost:8787/v1/apps/a/me"))
+        #expect(AppAIGatewayClient.whatwgNormalized(withPort).absoluteString == "http://localhost:8787/v1/apps/a/me")
+    }
+
+    @Test
+    func aSignedRequestTravelsOnTheNormalizedURL() async throws {
+        let signatures = SignatureLog()
+        MockURLProtocol.handler = { request in
+            if request.url!.path.hasSuffix("/auth/challenge") {
+                return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+            }
+            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600}"#)
+        }
+        let client = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .appAttestInstall,
+            attestProvider: MockAttestProvider(signatures: signatures),
+            credentialStore: MemoryCredentialStore(keyID: "existing-key"),
+            session: session()
+        )
+        let request = try await client.authorizedRequest(
+            provider: .openai, providerPath: "v1/./models/../responses", body: Data("{}".utf8)
+        )
+        #expect(request.url?.absoluteString == "https://gateway.test/v1/apps/test-app/proxy/openai/v1/responses")
+        let parts = try #require(request.value(forHTTPHeaderField: "X-AppAttest-Proof")).split(separator: ".").map(String.init)
+        let expected = AppAIGatewayClient.requestClientData(
+            appID: "test-app", method: "POST",
+            pathAndQuery: "/v1/apps/test-app/proxy/openai/v1/responses",
+            body: Data("{}".utf8), token: "gateway-token",
+            timestamp: try #require(Int(parts[1])), nonce: parts[2]
+        ).sha256
+        #expect(signatures.snapshot().last?.hash == expected)
+    }
 }
