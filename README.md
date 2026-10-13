@@ -9,7 +9,7 @@ Add `https://github.com/maxceem/app-ai-gateway-swift` in Xcode's **File → Add
 Package Dependencies**, or add this dependency to `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/maxceem/app-ai-gateway-swift", from: "2.0.0")
+.package(url: "https://github.com/maxceem/app-ai-gateway-swift", from: "1.4.0")
 ```
 
 Add the `AppAIGateway` product to your target.
@@ -56,11 +56,12 @@ there rather than from a URL of your own: on an app that verifies every
 request, a request without a proof is refused with `assertion_required`, and editing
 a signed request's URL breaks its proof.
 
-### Upgrading from 1.x
+### Upgrading to 1.4
 
-2.0 is required by apps that verify App Attest on every request.
-`authorizedRequest` now takes `body:` and `contentType:`; move a body you used
-to assign to `httpBody` into the call. API-key modes are unchanged and send no
+1.4 is required by apps that verify App Attest on every request.
+`authorizedRequest` now takes `body:` and `contentType:`, both optional, so
+existing calls compile unchanged; move a body you used to assign to `httpBody`
+into the call, because a body set afterwards is outside the proof. API-key modes are unchanged and send no
 proof. If your app sends a request and is refused with `attest_failed`,
 `auth_required` or `assertion_required`, call `discardAccessToken()` and build
 the request again with `authorizedRequest`, once. On a request built with
@@ -83,7 +84,7 @@ To release a new version, update `app-ai-gateway-swift/VERSION` in the source
 repository and merge the pull request into `main`. After tests pass, the
 publishing workflow syncs this repository and creates the matching immutable
 version tag. Changes without a version bump sync `main` without changing any
-released version. The current version is `2.0.0`. A failed publish can be retried
+released version. The current version is `1.4.0`. A failed publish can be retried
 with the source repository's **Publish Swift package** workflow.
 
 Licensed under the Apache License 2.0.
