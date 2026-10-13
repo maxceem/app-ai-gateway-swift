@@ -254,6 +254,23 @@ public actor AppAIGatewayClient {
         )
     }
 
+    /// The gateway's own `/me` route for this app: where the calling install
+    /// or user stands against the limits the app sets.
+    public func currentUserURL() -> URL {
+        baseURL.appending(path: "v1/apps/\(appID)/me")
+    }
+
+    /// A `GET /v1/apps/{app}/me` request, ready to send: the limits that apply
+    /// to the caller, its requests today, the month's spend against its
+    /// budget, and whether it is blocked. Signed in the App Attest modes like
+    /// every other gateway request, with the same key recovery, so build it
+    /// here rather than from a URL of your own: an unsigned request is refused
+    /// with `401 assertion_required`, and a signed request whose URL was
+    /// changed afterwards with `403 attest_failed`.
+    public func currentUserRequest() async throws -> URLRequest {
+        try await authorizedRequest(url: currentUserURL(), method: "GET", body: nil, contentType: nil)
+    }
+
     /// Forgets the gateway token this client holds, so the next request runs
     /// the exchange again. For an app that sent a request itself and was
     /// refused with `auth_required` or `attest_failed`: a fresh exchange

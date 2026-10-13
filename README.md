@@ -40,6 +40,11 @@ or the URL afterwards invalidates the proof, and the gateway refuses the
 request with `attest_failed`. Other headers may be added. Build a new request
 for every send: each proof is accepted once.
 
+To show the caller where they stand against your app's limits, send
+`currentUserRequest()`, a signed `GET /v1/apps/{app}/me`. Build it there
+rather than from a URL of your own: an unsigned request is refused with
+`assertion_required`, and editing a signed request's URL breaks its proof.
+
 ### Upgrading from 1.x
 
 2.0 is required by gateways that verify every request. `authorizedRequest`

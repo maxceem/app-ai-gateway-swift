@@ -1070,4 +1070,93 @@ struct AppAIGatewayClientTests {
         )
         #expect(error.limitScope == "install")
     }
+
+    /// `/me` is a gateway request like any other: signed in the App Attest
+    /// modes, over a `GET` with no body, by the key the token is bound to.
+    @Test
+    func currentUserRequestIsASignedGetOfMe() async throws {
+        let signatures = SignatureLog()
+        MockURLProtocol.handler = { request in
+            if request.url!.path.hasSuffix("/auth/challenge") {
+                return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+            }
+            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600}"#)
+        }
+        let client = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test/base")!,
+            authMode: .appAttestInstall,
+            attestProvider: MockAttestProvider(signatures: signatures),
+            credentialStore: MemoryCredentialStore(keyID: "existing-key"),
+            session: session()
+        )
+        #expect(await client.currentUserURL().absoluteString == "https://gateway.test/base/v1/apps/test-app/me")
+        let request = try await client.currentUserRequest()
+        #expect(request.httpMethod == "GET")
+        #expect(request.httpBody == nil)
+        #expect(request.url?.absoluteString == "https://gateway.test/base/v1/apps/test-app/me")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer gateway-token")
+        let proof = try #require(request.value(forHTTPHeaderField: "X-AppAttest-Proof"))
+        let parts = proof.split(separator: ".").map(String.init)
+        let expected = AppAIGatewayClient.requestClientData(
+            appID: "test-app",
+            method: "GET",
+            pathAndQuery: "/base/v1/apps/test-app/me",
+            body: nil,
+            token: "gateway-token",
+            timestamp: try #require(Int(parts[1])),
+            nonce: parts[2]
+        ).sha256
+        let signed = try #require(signatures.snapshot().last)
+        #expect(signed.keyID == "existing-key")
+        #expect(signed.hash == expected)
+    }
+
+    @Test
+    func currentUserRequestRecoversADeadKeyLikeAnyOtherRequest() async throws {
+        let dying = DyingKeys()
+        let registers = LockedCounter()
+        let tokens = LockedCounter()
+        MockURLProtocol.handler = { request in
+            if request.url!.path.hasSuffix("/auth/challenge") {
+                return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+            }
+            if request.url!.path.hasSuffix("/auth/register") {
+                registers.increment()
+                return response(request, status: 200, body: #"{"user_id":"generated-key"}"#)
+            }
+            let issued = tokens.increment()
+            return response(request, status: 200, body: "{\"access_token\":\"token-\(issued)\",\"expires_in\":3600}")
+        }
+        let client = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .appAttestInstall,
+            attestProvider: MockAttestProvider(dying: dying),
+            credentialStore: MemoryCredentialStore(keyID: "existing-key"),
+            session: session()
+        )
+        _ = try await client.gatewayAccessToken()
+        dying.kill("existing-key")
+        let request = try await client.currentUserRequest()
+        #expect(registers.snapshot() == 1)
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer token-2")
+        #expect(request.value(forHTTPHeaderField: "X-AppAttest-Proof") != nil)
+    }
+
+    @Test
+    func currentUserRequestInAPIKeyModeCarriesTheKeyAndNoProof() async throws {
+        MockURLProtocol.handler = { request in response(request, status: 500, body: "{}") }
+        let client = AppAIGatewayClient(
+            appID: "machine-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .apiKey(key: "agw_machine-key"),
+            endUserId: "customer-42",
+            session: session()
+        )
+        let request = try await client.currentUserRequest()
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer agw_machine-key")
+        #expect(request.value(forHTTPHeaderField: "X-End-User-ID") == "customer-42")
+        #expect(request.value(forHTTPHeaderField: "X-AppAttest-Proof") == nil)
+    }
 }
