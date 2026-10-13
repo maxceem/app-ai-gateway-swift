@@ -286,6 +286,125 @@ public actor AppAIGatewayClient {
         try await authorizedRequest(url: currentUserURL(), method: "GET", body: nil, contentType: nil)
     }
 
+    /// Builds a request to a provider through the gateway, hands it to `send`,
+    /// and builds it once more if the gateway answers `401`.
+    ///
+    /// The recommended way to send a gateway request. The client never
+    /// performs the request: `send` does, with any session, configuration or
+    /// networking library. Both of these fit it:
+    ///
+    /// ```swift
+    /// { try await URLSession.shared.data(for: $0) }
+    /// { try await URLSession.shared.bytes(for: $0) }
+    /// ```
+    ///
+    /// `bytes(for:)` makes streaming work: it returns as soon as the response
+    /// headers arrive, before the body, so the status is known while the
+    /// stream is still unread.
+    ///
+    /// A `401` is the gateway refusing the token or its absent proof:
+    /// `auth_required` for an expired token or one whose App Attest key the
+    /// gateway no longer knows, `assertion_required` for an unsigned request
+    /// on an app switched to verify every request after the token was cached.
+    /// On either, the client discards the token, builds the request again —
+    /// a fresh exchange, which re-registers the key where needed and picks up
+    /// the app's current `verify_on`, and a fresh proof, since a signed
+    /// request is good for one send — and calls `send` a second time. Whatever
+    /// that returns is returned, `401` included: a second refusal is real.
+    ///
+    /// Nothing else is retried. An error `send` throws is rethrown, and every
+    /// other status, `403` and `429` included, is returned as it is: a `403
+    /// attest_failed` shares its status with refusals a retry cannot help, and
+    /// the body, which may be a stream, is yours to read. Read a refusal with
+    /// ``GatewayError/init(response:body:)``.
+    ///
+    /// `provider` is a provider instance slug, not a provider type. See
+    /// ``ProviderSlug``. The request is built, and signed over its body and
+    /// URL, exactly as `authorizedRequest` builds it: headers other than
+    /// `Authorization` may be added to it inside `send`, but its body and URL
+    /// must stay as they are.
+    public func withAuthorizedRequest<Body: Sendable>(
+        provider: String,
+        providerPath: String,
+        method: String = "POST",
+        body: Data? = nil,
+        contentType: String? = nil,
+        send: @Sendable (URLRequest) async throws -> (Body, URLResponse)
+    ) async throws -> (Body, URLResponse) {
+        try await retryingOnce(send: send) {
+            try await self.authorizedRequest(
+                provider: provider,
+                providerPath: providerPath,
+                method: method,
+                body: body,
+                contentType: contentType
+            )
+        }
+    }
+
+    /// Sends a request to a provider through the gateway, rebuilt and sent
+    /// once more on a `401`. See the `provider: String` form.
+    public func withAuthorizedRequest<Body: Sendable>(
+        provider: ProviderSlug,
+        providerPath: String,
+        method: String = "POST",
+        body: Data? = nil,
+        contentType: String? = nil,
+        send: @Sendable (URLRequest) async throws -> (Body, URLResponse)
+    ) async throws -> (Body, URLResponse) {
+        try await withAuthorizedRequest(
+            provider: provider.rawValue,
+            providerPath: providerPath,
+            method: method,
+            body: body,
+            contentType: contentType,
+            send: send
+        )
+    }
+
+    /// Sends a request to a custom endpoint, rebuilt and sent once more on a
+    /// `401`. See the `provider: String` form.
+    public func withAuthorizedRequest<Body: Sendable>(
+        endpointSlug: String,
+        method: String = "POST",
+        body: Data? = nil,
+        contentType: String? = nil,
+        send: @Sendable (URLRequest) async throws -> (Body, URLResponse)
+    ) async throws -> (Body, URLResponse) {
+        try await retryingOnce(send: send) {
+            try await self.authorizedRequest(
+                endpointSlug: endpointSlug,
+                method: method,
+                body: body,
+                contentType: contentType
+            )
+        }
+    }
+
+    /// Sends ``currentUserRequest()``, rebuilt and sent once more on a `401`.
+    /// See the `provider: String` form of `withAuthorizedRequest`.
+    public func withCurrentUserRequest<Body: Sendable>(
+        send: @Sendable (URLRequest) async throws -> (Body, URLResponse)
+    ) async throws -> (Body, URLResponse) {
+        try await retryingOnce(send: send) {
+            try await self.currentUserRequest()
+        }
+    }
+
+    /// The one retry every `with…Request` form shares: on a `401`, discard the
+    /// token and send a request built afresh, never the one already sent.
+    private func retryingOnce<Body: Sendable>(
+        send: @Sendable (URLRequest) async throws -> (Body, URLResponse),
+        build: () async throws -> URLRequest
+    ) async throws -> (Body, URLResponse) {
+        let first = try await send(try await build())
+        guard let http = first.1 as? HTTPURLResponse, http.statusCode == 401 else {
+            return first
+        }
+        discardAccessToken()
+        return try await send(try await build())
+    }
+
     /// Forgets the gateway token this client holds, so the next request runs
     /// the exchange again. For an app that sent a request itself and was
     /// refused with `auth_required`, `attest_failed` or `assertion_required`:
@@ -293,6 +412,7 @@ public actor AppAIGatewayClient {
     /// longer knows it, and picks up the app's current `verify_on`, so a
     /// request rebuilt after an app was switched to verify every request is
     /// signed. Rebuild the request once; a second refusal is real.
+    /// `withAuthorizedRequest` and `withCurrentUserRequest` do this on a `401`.
     public func discardAccessToken() {
         accessToken = nil
         refreshTask?.cancel()
