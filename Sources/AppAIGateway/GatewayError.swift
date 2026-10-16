@@ -47,6 +47,11 @@ public enum GatewayErrorCode: String, Codable, Sendable {
     case unclaimedAccessExpired = "unclaimed_access_expired"
     /// The unclaimed account passed its recovery deadline and cannot be used.
     case accountExpired = "account_expired"
+    /// The deployment verifies email addresses, and the owner of the account
+    /// this app belongs to has not verified theirs yet. The account owner has
+    /// to open the link in their verification email; retrying or replacing
+    /// application credentials cannot help.
+    case emailUnverified = "email_unverified"
     /// The organization used up the current scheduled request allowance its plan
     /// grants. Shared by every application, credential and user the organization
     /// owns, so another client's traffic can exhaust it, and nothing the app

@@ -427,6 +427,7 @@ struct AppAIGatewayClientTests {
         for (wireCode, expected) in [
             ("unclaimed_access_expired", GatewayErrorCode.unclaimedAccessExpired),
             ("account_expired", GatewayErrorCode.accountExpired),
+            ("email_unverified", GatewayErrorCode.emailUnverified),
         ] {
             let error = try #require(GatewayError(
                 response: HTTPURLResponse(
