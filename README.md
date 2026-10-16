@@ -9,7 +9,7 @@ Add `https://github.com/maxceem/app-ai-gateway-swift` in Xcode's **File → Add
 Package Dependencies**, or add this dependency to `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/maxceem/app-ai-gateway-swift", from: "1.4.1")
+.package(url: "https://github.com/maxceem/app-ai-gateway-swift", from: "1.5.0")
 ```
 
 Add the `AppAIGateway` product to your target.
@@ -128,7 +128,7 @@ To release a new version, update `app-ai-gateway-swift/VERSION` in the source
 repository and merge the pull request into `main`. After tests pass, the
 publishing workflow syncs this repository and creates the matching immutable
 version tag. Changes without a version bump sync `main` without changing any
-released version. The current version is `1.4.1`. A failed publish can be retried
+released version. The current version is `1.5.0`. A failed publish can be retried
 with the source repository's **Publish Swift package** workflow.
 
 Licensed under the Apache License 2.0.
