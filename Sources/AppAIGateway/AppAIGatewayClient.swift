@@ -270,22 +270,26 @@ public actor AppAIGatewayClient {
 
     /// A server-configured endpoint. The provider, model, and any baked
     /// parameters live in the gateway's endpoint row, so the caller sends only
-    /// the request body its slug expects.
-    public func endpointURL(slug: String) -> URL {
-        baseURL.appending(path: "v1/apps/\(appID)/endpoints/\(slug)")
+    /// the request body its slug expects, and the query its format documents:
+    /// `alt=sse` streams a `gemini_native` endpoint, as Gemini's own API does.
+    public func endpointURL(slug: String, query: [URLQueryItem] = []) -> URL {
+        let url = baseURL.appending(path: "v1/apps/\(appID)/endpoints/\(slug)")
+        return query.isEmpty ? url : url.appending(queryItems: query)
     }
 
     /// A request to a custom endpoint, ready to send. Signed over its body and
     /// URL exactly as the provider form is, where the app verifies App Attest
-    /// on every request: pass the body here, and change neither afterwards.
+    /// on every request: pass the body and the query here, and change neither
+    /// afterwards.
     public func authorizedRequest(
         endpointSlug: String,
+        query: [URLQueryItem] = [],
         method: String = "POST",
         body: Data? = nil,
         contentType: String? = nil
     ) async throws -> URLRequest {
         try await authorizedRequest(
-            url: endpointURL(slug: endpointSlug),
+            url: endpointURL(slug: endpointSlug, query: query),
             method: method,
             body: body,
             contentType: contentType
@@ -391,6 +395,7 @@ public actor AppAIGatewayClient {
     /// `401`. See the `provider: String` form.
     public func withAuthorizedRequest<Body: Sendable>(
         endpointSlug: String,
+        query: [URLQueryItem] = [],
         method: String = "POST",
         body: Data? = nil,
         contentType: String? = nil,
@@ -399,6 +404,7 @@ public actor AppAIGatewayClient {
         try await retryingOnce(send: send) {
             try await self.authorizedRequest(
                 endpointSlug: endpointSlug,
+                query: query,
                 method: method,
                 body: body,
                 contentType: contentType

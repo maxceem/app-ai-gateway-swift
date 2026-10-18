@@ -9,7 +9,7 @@ Add `https://github.com/maxceem/app-ai-gateway-swift` in Xcode's **File → Add
 Package Dependencies**, or add this dependency to `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/maxceem/app-ai-gateway-swift", from: "1.5.0")
+.package(url: "https://github.com/maxceem/app-ai-gateway-swift", from: "1.6.0")
 ```
 
 Add the `AppAIGateway` product to your target.
@@ -54,6 +54,20 @@ guard (200..<300).contains(http.statusCode) else {
 for try await line in bytes.lines {
     print(line)
 }
+```
+
+A custom endpoint is called the same way, with `endpointSlug:`. A Gemini one
+streams when its URL carries `alt=sse`: pass that query to the helper, which
+signs it with the rest of the URL. A query added to the request afterwards
+invalidates its proof.
+
+```swift
+let (bytes, response) = try await gateway.withAuthorizedRequest(
+    endpointSlug: "gemini-chat",
+    query: [URLQueryItem(name: "alt", value: "sse")],
+    body: body,
+    contentType: "application/json"
+) { try await URLSession.shared.bytes(for: $0) }
 ```
 
 If the gateway answers `401`, the helper discards its token, builds the
@@ -128,7 +142,7 @@ To release a new version, update `app-ai-gateway-swift/VERSION` in the source
 repository and merge the pull request into `main`. After tests pass, the
 publishing workflow syncs this repository and creates the matching immutable
 version tag. Changes without a version bump sync `main` without changing any
-released version. The current version is `1.5.0`. A failed publish can be retried
+released version. The current version is `1.6.0`. A failed publish can be retried
 with the source repository's **Publish Swift package** workflow.
 
 Licensed under the Apache License 2.0.

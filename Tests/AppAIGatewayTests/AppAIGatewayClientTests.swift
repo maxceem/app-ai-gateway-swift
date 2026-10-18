@@ -999,6 +999,40 @@ struct AppAIGatewayClientTests {
         #expect(second.value(forHTTPHeaderField: "X-AppAttest-Proof") != proof)
     }
 
+    /// A query an endpoint's format documents, `alt=sse` on a Gemini one, is
+    /// part of the URL the proof is signed over, so it is passed before signing.
+    @Test
+    func endpointRequestsSignTheirQuery() async throws {
+        let signatures = SignatureLog()
+        let client = numberedTokenClient(tokens: LockedCounter(), signatures: signatures)
+        #expect(
+            await client.endpointURL(slug: "gemini", query: [URLQueryItem(name: "alt", value: "sse")]).absoluteString
+                == "https://gateway.test/v1/apps/test-app/endpoints/gemini?alt=sse"
+        )
+        let body = Data(#"{"contents":[]}"#.utf8)
+        let transport = FakeTransport(statuses: [200])
+        _ = try await client.withAuthorizedRequest(
+            endpointSlug: "gemini",
+            query: [URLQueryItem(name: "alt", value: "sse")],
+            body: body,
+            send: transport.send
+        )
+        let sent = try #require(transport.snapshot().first)
+        #expect(sent.url?.absoluteString == "https://gateway.test/v1/apps/test-app/endpoints/gemini?alt=sse")
+        let proof = try #require(sent.value(forHTTPHeaderField: "X-AppAttest-Proof"))
+        let parts = proof.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        let signed = try #require(signatures.snapshot().last)
+        #expect(signed.hash == AppAIGatewayClient.requestClientData(
+            appID: "test-app",
+            method: "POST",
+            pathAndQuery: "/v1/apps/test-app/endpoints/gemini?alt=sse",
+            body: body,
+            token: "token-1",
+            timestamp: try #require(Int(parts[1])),
+            nonce: parts[2]
+        ).sha256)
+    }
+
     /// An app that verifies App Attest on the token exchange, and an older
     /// gateway that says nothing about it: the token alone, nothing signed.
     @Test
