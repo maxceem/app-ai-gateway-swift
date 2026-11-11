@@ -106,6 +106,16 @@ it as `verify_on`:
 Build requests through the package in either case, so a change of the
 setting needs no change in your app.
 
+In the App Attest modes the token exchange also sends the app's App Store
+transaction (StoreKit's `AppTransaction`), signed by Apple and bound into the
+exchange's assertion. That lets an app measure its monthly budget per Apple
+Account, which holds across reinstalls and devices, rather than per install.
+There is nothing to configure, and the user is never asked to sign in: the
+package reads only what StoreKit already has. Where no transaction is
+available, as on a simulator or offline, the exchange goes ahead without one
+and the gateway counts the install. A gateway too old to read the transaction
+is not sent one.
+
 To show the caller where they stand against your app's limits, send
 `withCurrentUserRequest`, a `GET /v1/apps/{app}/me` signed the same way and
 resent once on a `401` (`currentUserRequest()` builds it alone). Build it

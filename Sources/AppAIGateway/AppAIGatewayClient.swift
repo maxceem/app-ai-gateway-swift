@@ -51,6 +51,9 @@ public enum GatewayAuthMode: Sendable {
     /// The key lives in the Secure Enclave for one install of one app, so it
     /// does not survive reinstalling or clearing the app's data. Per-install
     /// limits and blocks hold, but a user can shed one by starting over.
+    /// The exchange also sends the app's App Store transaction, so an
+    /// application that measures its budget per Apple Account keeps counting
+    /// the same person after a reinstall.
     case appAttestInstall
 
     /// With an issuer provider, the API key is exchanged for a per-user gateway token.
@@ -85,6 +88,11 @@ public actor AppAIGatewayClient {
 
     private struct ChallengeResponse: Decodable {
         let challenge: String
+        /// Whether the gateway that issued the challenge reads an App Store
+        /// transaction in the exchange. Absent from an older gateway, which
+        /// ignores the body field but rebuilds the three-key client data, so
+        /// a four-key assertion would fail there.
+        let accepts_app_transaction: Bool?
     }
 
     private let appID: String
@@ -94,6 +102,7 @@ public actor AppAIGatewayClient {
     private let endUserHeader: String
     private let issuerRejectionRecovery: IssuerRejectionRecovery?
     private let attestProvider: any AppAttestProviding
+    private let appTransactionProvider: any AppTransactionProviding
     private let credentialStore: any GatewayCredentialStoring
     private let session: URLSession
     private var accessToken: AccessToken?
@@ -122,6 +131,7 @@ public actor AppAIGatewayClient {
         endUserHeader: String = "X-End-User-ID",
         issuerRejectionRecovery: IssuerRejectionRecovery? = nil,
         attestProvider: any AppAttestProviding = SystemAppAttestProvider(),
+        appTransactionProvider: any AppTransactionProviding = SystemAppTransactionProvider(),
         credentialStore: any GatewayCredentialStoring = KeychainGatewayCredentialStore(),
         session: URLSession = .shared
     ) {
@@ -132,6 +142,7 @@ public actor AppAIGatewayClient {
         self.endUserHeader = endUserHeader
         self.issuerRejectionRecovery = issuerRejectionRecovery
         self.attestProvider = attestProvider
+        self.appTransactionProvider = appTransactionProvider
         self.credentialStore = credentialStore
         self.session = session
     }
@@ -727,10 +738,20 @@ public actor AppAIGatewayClient {
     /// The token, and the key it is bound to: the gateway mints it for the
     /// install whose key signed the exchange, and where it verifies every
     /// request, refuses each one that another key signed.
+    ///
+    /// The app's App Store transaction is fetched once, up front, and every
+    /// assertion this exchange signs — a replacement key's included — is bound
+    /// to that same value, so the body never names a transaction other than
+    /// the one signed over. Each assertion carries it only where its own
+    /// challenge says the gateway reads one: an older gateway would check a
+    /// four-key client data against the three keys it knows and refuse the
+    /// exchange. Fetching it before any challenge keeps a slow StoreKit from
+    /// eating into a challenge's lifetime.
     private func productionExchange(forceIssuerRefresh: Bool) async throws -> (TokenResponse, String) {
         guard attestProvider.isSupported else {
             throw GatewayError(code: .attestFailed, message: "App Attest is unavailable on this device", statusCode: 0)
         }
+        let appTransaction = await appTransactionProvider.jwsRepresentation()
         var keyID = try credentialStore.appAttestKeyID(for: appID)
         if keyID == nil {
             keyID = try await registerKey(forceIssuerRefresh: forceIssuerRefresh)
@@ -738,14 +759,18 @@ public actor AppAIGatewayClient {
         guard let keyID else {
             throw GatewayError(code: .attestFailed, message: "App Attest key registration failed", statusCode: 0)
         }
-        let signed = try await signedAssertion(for: keyID, forceIssuerRefresh: forceIssuerRefresh)
+        let signed = try await signedAssertion(
+            for: keyID,
+            appTransaction: appTransaction,
+            forceIssuerRefresh: forceIssuerRefresh
+        )
         let issuerToken = try await optionalIssuerToken(forceRefresh: forceIssuerRefresh)
         do {
             return (try await postJSON(path: "auth/token", body: tokenBody(issuerToken, signed)), signed.keyID)
         } catch let error as GatewayError where error.code == .attestFailed {
             // The gateway holds a key this device is no longer signing with.
             let replacement = try await replaceKey(forceIssuerRefresh: forceIssuerRefresh)
-            let retry = try await sign(with: replacement)
+            let retry = try await sign(with: replacement, appTransaction: appTransaction)
             return (try await postJSON(path: "auth/token", body: tokenBody(issuerToken, retry)), retry.keyID)
         }
     }
@@ -754,6 +779,8 @@ public actor AppAIGatewayClient {
         let keyID: String
         let challenge: String
         let assertion: Data
+        /// The App Store transaction the assertion is bound to, sent beside it.
+        let appTransaction: String?
     }
 
     /// Signs a challenge, replacing the key first if this device can no longer
@@ -774,23 +801,56 @@ public actor AppAIGatewayClient {
     /// Only the signing call is guarded. Fetching a challenge is a network
     /// request, and a flight-mode failure there must not be mistaken for a dead
     /// key and cost the user a perfectly good one.
-    private func signedAssertion(for keyID: String, forceIssuerRefresh: Bool) async throws -> SignedAssertion {
-        let challengeValue = try await challenge()
-        let clientData = Self.assertionClientData(app: appID, challenge: challengeValue, keyID: keyID)
+    private func signedAssertion(
+        for keyID: String,
+        appTransaction: String?,
+        forceIssuerRefresh: Bool
+    ) async throws -> SignedAssertion {
+        let issued = try await challengeResponse()
+        let bound = Self.boundAppTransaction(appTransaction, to: issued)
+        let clientData = Self.assertionClientData(
+            app: appID,
+            challenge: issued.challenge,
+            keyID: keyID,
+            appTransaction: bound
+        )
         do {
             let assertion = try await attestProvider.generateAssertion(keyID, clientDataHash: clientData.sha256)
-            return SignedAssertion(keyID: keyID, challenge: challengeValue, assertion: assertion)
+            return SignedAssertion(
+                keyID: keyID,
+                challenge: issued.challenge,
+                assertion: assertion,
+                appTransaction: bound
+            )
         } catch {
             let replacement = try await replaceKey(forceIssuerRefresh: forceIssuerRefresh)
-            return try await sign(with: replacement)
+            return try await sign(with: replacement, appTransaction: appTransaction)
         }
     }
 
-    private func sign(with keyID: String) async throws -> SignedAssertion {
-        let challengeValue = try await challenge()
-        let clientData = Self.assertionClientData(app: appID, challenge: challengeValue, keyID: keyID)
+    private func sign(with keyID: String, appTransaction: String?) async throws -> SignedAssertion {
+        let issued = try await challengeResponse()
+        let bound = Self.boundAppTransaction(appTransaction, to: issued)
+        let clientData = Self.assertionClientData(
+            app: appID,
+            challenge: issued.challenge,
+            keyID: keyID,
+            appTransaction: bound
+        )
         let assertion = try await attestProvider.generateAssertion(keyID, clientDataHash: clientData.sha256)
-        return SignedAssertion(keyID: keyID, challenge: challengeValue, assertion: assertion)
+        return SignedAssertion(
+            keyID: keyID,
+            challenge: issued.challenge,
+            assertion: assertion,
+            appTransaction: bound
+        )
+    }
+
+    /// The transaction an assertion over `issued` may carry: none unless the
+    /// gateway that issued the challenge said it reads one. Decided per
+    /// challenge, since each is the gateway's answer at the moment it signs.
+    private static func boundAppTransaction(_ appTransaction: String?, to issued: ChallengeResponse) -> String? {
+        issued.accepts_app_transaction == true ? appTransaction : nil
     }
 
     /// Registers a replacement, and lets `registerKey` store it once the
@@ -812,6 +872,10 @@ public actor AppAIGatewayClient {
     /// Omits `issuer_token` entirely in install mode. The gateway refuses one
     /// there rather than ignoring it, because a client presenting a token
     /// believes it is authenticating a person.
+    ///
+    /// `app_transaction` is sent only beside an assertion bound to it: the
+    /// gateway checks the one against the other, so a transaction lifted from
+    /// another device cannot be swapped in to borrow its Apple Account.
     private func tokenBody(_ issuerToken: String?, _ signed: SignedAssertion) -> [String: String] {
         var body = [
             "key_id": signed.keyID,
@@ -819,6 +883,7 @@ public actor AppAIGatewayClient {
             "challenge": signed.challenge,
         ]
         if let issuerToken { body["issuer_token"] = issuerToken }
+        if let appTransaction = signed.appTransaction { body["app_transaction"] = appTransaction }
         return body
     }
 
@@ -841,8 +906,11 @@ public actor AppAIGatewayClient {
     }
 
     private func challenge() async throws -> String {
-        let response: ChallengeResponse = try await postJSON(path: "auth/challenge", body: [:])
-        return response.challenge
+        try await challengeResponse().challenge
+    }
+
+    private func challengeResponse() async throws -> ChallengeResponse {
+        try await postJSON(path: "auth/challenge", body: [:])
     }
 
     /// The issuer token this mode presents, or `nil` where the mode has no user
@@ -923,8 +991,32 @@ public actor AppAIGatewayClient {
         return max(1, lifetime - leeway)
     }
 
-    static func assertionClientData(app: String, challenge: String, keyID: String) -> Data {
-        Data("{\"app\":\"\(app)\",\"challenge\":\"\(challenge)\",\"key_id\":\"\(keyID)\"}".utf8)
+    /// What the token exchange's assertion is signed over: JSON written by
+    /// hand, because the gateway rebuilds it byte for byte and Foundation
+    /// promises neither key order nor how `/` is escaped. No value needs
+    /// escaping: an app id is a slug, a challenge base64url, a key id
+    /// standard base64.
+    ///
+    /// With an App Store transaction, a fourth key closes it: the
+    /// transaction's SHA-256, base64url without padding. Without one it is the
+    /// three-key form, byte for byte, that it has always been.
+    static func assertionClientData(
+        app: String,
+        challenge: String,
+        keyID: String,
+        appTransaction: String? = nil
+    ) -> Data {
+        var json = "{\"app\":\"\(app)\",\"challenge\":\"\(challenge)\",\"key_id\":\"\(keyID)\""
+        if let appTransaction {
+            json += ",\"app_transaction\":\"\(appTransactionHash(appTransaction))\""
+        }
+        return Data((json + "}").utf8)
+    }
+
+    /// SHA-256 of the transaction's UTF-8 bytes, base64url without padding:
+    /// what the exchange's client data binds the transaction by.
+    static func appTransactionHash(_ appTransaction: String) -> String {
+        Data(appTransaction.utf8).sha256.base64URLEncodedString()
     }
 
     static func apiKeyTokenBody(issuerToken: String, apiKey: String) -> [String: String] {

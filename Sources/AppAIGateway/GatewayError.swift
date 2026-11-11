@@ -219,10 +219,12 @@ public struct GatewayError: Error, Sendable, LocalizedError {
 
     /// Which of the application's own limits refused the call: `"install"` for
     /// one counted for this install alone — an App Attest application counts
-    /// its request limits, and by default its budget, per install — `"user"`
-    /// for one set on this user alone, `"app"` for one shared by every user of
-    /// the application. `nil` for any rejection that is not an application
-    /// limit.
+    /// its request limits, and by default its budget, per install —
+    /// `"apple_account"` for a budget counted over the person's Apple Account,
+    /// across their installs and devices, where the application chose that and
+    /// the install sent its App Store transaction, `"user"` for one set on
+    /// this user alone, `"app"` for one shared by every user of the
+    /// application. `nil` for any rejection that is not an application limit.
     ///
     /// Worth telling apart in a client: an `"app"` refusal is somebody else's
     /// traffic, so backing this user off does not help.
