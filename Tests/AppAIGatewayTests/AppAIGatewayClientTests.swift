@@ -1875,6 +1875,140 @@ struct AppAIGatewayClientTests {
         #expect(events == ["event-2-a", "event-2-b"])
         #expect(calls.snapshot() == 2)
     }
+
+    // MARK: The package's own version
+
+    /// A release is cut from `VERSION`, so the version the package names itself
+    /// with has to be that one: bump both together.
+    @Test
+    func theClientSDKVersionIsThePackageVersion() throws {
+        let file = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appending(path: "VERSION")
+        let version = try String(contentsOf: file, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(ClientSDK.version == version)
+        #expect(ClientSDK.headerValue == "app-ai-gateway-swift/\(version)")
+    }
+
+    /// Every request an App Attest client sends — challenge, register, token —
+    /// and every one it builds — provider, endpoint, `/me` — names the package,
+    /// and a signed one is signed exactly as it was before the header existed.
+    @Test
+    func everyAppAttestRequestNamesThePackageAndStillSignsTheSameBytes() async throws {
+        let sent = SentHeaders()
+        let signatures = SignatureLog()
+        MockURLProtocol.handler = { request in
+            sent.record(request)
+            if request.url!.path.hasSuffix("/auth/challenge") {
+                return response(request, status: 200, body: #"{"challenge":"Y2hhbGxlbmdl"}"#)
+            }
+            if request.url!.path.hasSuffix("/auth/register") {
+                return response(request, status: 200, body: #"{"user_id":"generated-key"}"#)
+            }
+            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600,"verify_on":"every_request"}"#)
+        }
+        let client = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .appAttestInstall,
+            attestProvider: MockAttestProvider(signatures: signatures),
+            // No key yet, so the exchange registers one first.
+            credentialStore: MemoryCredentialStore(),
+            session: session()
+        )
+        let body = Data(#"{"model":"gpt-5.6-sol","input":"hi"}"#.utf8)
+        let built = [
+            try await client.authorizedRequest(provider: .openai, providerPath: "v1/responses", body: body),
+            try await client.authorizedRequest(endpointSlug: "chat", body: body),
+            try await client.currentUserRequest(),
+        ]
+
+        let paths = sent.snapshot().map(\.path)
+        #expect(paths.contains { $0.hasSuffix("/auth/challenge") })
+        #expect(paths.contains { $0.hasSuffix("/auth/register") })
+        #expect(paths.contains { $0.hasSuffix("/auth/token") })
+        for request in sent.snapshot() {
+            #expect(request.clientSDK == ClientSDK.headerValue, "\(request.path)")
+            #expect(request.appVersion != nil, "\(request.path)")
+        }
+        for request in built {
+            #expect(request.value(forHTTPHeaderField: "X-Client-SDK") == ClientSDK.headerValue)
+            #expect(request.value(forHTTPHeaderField: "X-App-Version") != nil)
+        }
+
+        // The proof is over the method, URL, body and token alone: the bytes
+        // the gateway rebuilds, with no header among them.
+        let proxy = try #require(built.first)
+        let proof = try #require(proxy.value(forHTTPHeaderField: "X-AppAttest-Proof"))
+        let parts = proof.split(separator: ".").map(String.init)
+        let expected = AppAIGatewayClient.requestClientData(
+            appID: "test-app",
+            method: "POST",
+            pathAndQuery: "/v1/apps/test-app/proxy/openai/v1/responses",
+            body: body,
+            token: "gateway-token",
+            timestamp: try #require(Int(parts[1])),
+            nonce: parts[2]
+        ).sha256
+        let requestSignatures = signatures.snapshot().suffix(3)
+        #expect(requestSignatures.first?.hash == expected)
+    }
+
+    @Test
+    func apiKeyRequestsAndTheirExchangeNameThePackage() async throws {
+        let sent = SentHeaders()
+        MockURLProtocol.handler = { request in
+            sent.record(request)
+            return response(request, status: 200, body: #"{"access_token":"gateway-token","expires_in":3600}"#)
+        }
+        let exchanging = AppAIGatewayClient(
+            appID: "test-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .apiKey(key: "agw_test-key", issuerTokenProvider: { _ in "firebase-token" }),
+            session: session()
+        )
+        let proxied = try await exchanging.authorizedRequest(provider: .openai, providerPath: "v1/responses")
+        #expect(proxied.value(forHTTPHeaderField: "X-Client-SDK") == ClientSDK.headerValue)
+        let exchange = try #require(sent.snapshot().first)
+        #expect(exchange.path.hasSuffix("/auth/token"))
+        #expect(exchange.clientSDK == ClientSDK.headerValue)
+
+        // A key sent directly has no exchange, so the request it builds is
+        // the only one that can name the package.
+        let direct = AppAIGatewayClient(
+            appID: "machine-app",
+            baseURL: URL(string: "https://gateway.test")!,
+            authMode: .apiKey(key: "agw_machine-key"),
+            session: session()
+        )
+        let me = try await direct.currentUserRequest()
+        #expect(me.value(forHTTPHeaderField: "X-Client-SDK") == ClientSDK.headerValue)
+        let endpoint = try await direct.authorizedRequest(endpointSlug: "chat")
+        #expect(endpoint.value(forHTTPHeaderField: "X-Client-SDK") == ClientSDK.headerValue)
+    }
+}
+
+/// The identifying headers of every request that reached the network.
+final class SentHeaders: @unchecked Sendable {
+    struct Entry {
+        let path: String
+        let clientSDK: String?
+        let appVersion: String?
+    }
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+    func record(_ request: URLRequest) {
+        let entry = Entry(
+            path: request.url?.path ?? "",
+            clientSDK: request.value(forHTTPHeaderField: "X-Client-SDK"),
+            appVersion: request.value(forHTTPHeaderField: "X-App-Version")
+        )
+        lock.withLock { entries.append(entry) }
+    }
+    func snapshot() -> [Entry] { lock.withLock { entries } }
 }
 
 /// An App Attest provider whose numbered `generateAssertion` calls wait until

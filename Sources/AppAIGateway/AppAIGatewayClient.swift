@@ -498,7 +498,7 @@ public actor AppAIGatewayClient {
             // a 400 on every request rather than a silently unattributed one.
             request.setValue(endUserId, forHTTPHeaderField: endUserHeader)
         }
-        request.setValue(Self.appVersion, forHTTPHeaderField: "X-App-Version")
+        Self.identifyClient(&request)
         guard usesAppAttest else {
             request.setValue("Bearer \(try await gatewayAccessToken())", forHTTPHeaderField: "Authorization")
             return request
@@ -946,6 +946,7 @@ public actor AppAIGatewayClient {
         var request = URLRequest(url: baseURL.appending(path: "v1/apps/\(appID)/\(path)"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        Self.identifyClient(&request)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
@@ -1032,5 +1033,13 @@ public actor AppAIGatewayClient {
 
     private static var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    }
+
+    /// The headers every request this client sends or builds names itself
+    /// with: the app's version and this package's. Neither is signed: a
+    /// request proof covers the method, URL, body and token, never a header.
+    private static func identifyClient(_ request: inout URLRequest) {
+        request.setValue(appVersion, forHTTPHeaderField: "X-App-Version")
+        request.setValue(ClientSDK.headerValue, forHTTPHeaderField: ClientSDK.headerField)
     }
 }

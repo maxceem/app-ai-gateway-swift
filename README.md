@@ -139,6 +139,11 @@ gets it whenever the app verifies every request. If you send requests built
 with `authorizedRequest`, handle a `401` yourself: call `discardAccessToken()`
 and build the request again, once.
 
+Every request the package sends or builds names your app's version in
+`X-App-Version` and the package's in `X-Client-SDK`
+(`app-ai-gateway-swift/<version>`), so the gateway can show which package
+release your installs run. Neither header is sent on to the provider.
+
 Requires iOS 16 or macOS 13. App Attest needs a real device.
 
 - Guide: https://docs.appaigateway.com/integrate/ios/
@@ -149,7 +154,9 @@ This repository is published from the `app-ai-gateway-swift` directory of
 issues and pull requests there.
 
 To release a new version, update `app-ai-gateway-swift/VERSION` in the source
-repository and merge the pull request into `main`. After tests pass, the
+repository, set `ClientSDK.version` in `Sources/AppAIGateway/ClientSDK.swift`
+to the same value (a test fails until they match), and merge the pull request
+into `main`. After tests pass, the
 publishing workflow syncs this repository and creates the matching immutable
 version tag. Changes without a version bump sync `main` without changing any
 released version. The current version is `1.7.0`. A failed publish can be retried
