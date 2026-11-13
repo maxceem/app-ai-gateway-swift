@@ -708,6 +708,16 @@ struct AppAIGatewayClientTests {
         )
     }
 
+    /// Polls `condition` until it holds, for up to `seconds`.
+    private static func eventually(within seconds: Double, _ condition: () -> Bool) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if condition() { return true }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        return condition()
+    }
+
     /// Polls `token()` until it answers `expected`, for up to `seconds`.
     private static func eventually(
         _ expected: String,
@@ -740,8 +750,7 @@ struct AppAIGatewayClientTests {
 
         // The refresh behind it has failed: the token it was replacing is
         // still accepted, so requests keep it, without waiting for an exchange.
-        try await Task.sleep(for: .seconds(1.3))
-        #expect(tokenCalls.snapshot() == 2)
+        #expect(try await Self.eventually(within: 3) { tokenCalls.snapshot() == 2 })
         let started = Date()
         #expect(try await client.gatewayAccessToken() == "token-1")
         #expect(Date().timeIntervalSince(started) < 0.5)
@@ -765,12 +774,85 @@ struct AppAIGatewayClientTests {
         #expect(try await client.gatewayAccessToken() == "token-1")
 
         // The refresh behind it is under way and slow; the request does not wait for it.
-        try await Task.sleep(for: .seconds(1.3))
+        #expect(try await Self.eventually(within: 3) { tokenCalls.snapshot() == 2 })
         let started = Date()
         #expect(try await client.gatewayAccessToken() == "token-1")
         #expect(Date().timeIntervalSince(started) < 0.5)
         #expect(try await Self.eventually("token-2", within: 5) { try await client.gatewayAccessToken() })
         #expect(tokenCalls.snapshot() == 2)
+    }
+
+    @Test
+    func doesNotRetryARefreshTheGatewayRefusedForGood() async throws {
+        let tokenCalls = LockedCounter()
+        MockURLProtocol.handler = { request in
+            if tokenCalls.increment() == 1 {
+                return response(request, status: 200, body: "{\"access_token\":\"token-1\",\"expires_in\":\(Self.shortToken)}")
+            }
+            return response(request, status: 403, body: #"{"error":{"code":"auth_required","message":"User is blocked"}}"#)
+        }
+        let client = Self.timedClient()
+        #expect(try await client.gatewayAccessToken() == "token-1")
+        #expect(try await Self.eventually(within: 3) { tokenCalls.snapshot() == 2 })
+        // A refusal no wait would change is not tried again behind the token,
+        // which the gateway goes on judging request by request.
+        try await Task.sleep(for: .seconds(2.5))
+        #expect(tokenCalls.snapshot() == 2)
+        #expect(try await client.gatewayAccessToken() == "token-1")
+        #expect(tokenCalls.snapshot() == 2)
+    }
+
+    @Test
+    func waitsForAndSurfacesAFailedExchangeOnceTheTokenRunsOut() async throws {
+        let tokenCalls = LockedCounter()
+        MockURLProtocol.handler = { request in
+            if tokenCalls.increment() == 1 {
+                return response(request, status: 200, body: #"{"access_token":"token-1","expires_in":3}"#)
+            }
+            return response(request, status: 503, body: #"{"error":{"code":"service_unavailable","message":"retry"}}"#)
+        }
+        let client = Self.timedClient()
+        #expect(try await client.gatewayAccessToken() == "token-1")
+        // Past `usableUntil` (2.5 s for a 3 s token) the request waits for the
+        // exchange, and its failure is the request's.
+        try await Task.sleep(for: .seconds(2.8))
+        var failed = false
+        do {
+            _ = try await client.gatewayAccessToken()
+        } catch let error as GatewayError {
+            failed = error.statusCode == 503
+        }
+        #expect(failed)
+    }
+
+    @Test
+    func aDiscardDoesNotWaitOutAFailedRefresh() async throws {
+        let tokenCalls = LockedCounter()
+        MockURLProtocol.handler = { request in
+            let call = tokenCalls.increment()
+            if call == 1 {
+                return response(request, status: 200, body: "{\"access_token\":\"token-1\",\"expires_in\":\(Self.shortToken)}")
+            }
+            if call == 2 {
+                return response(request, status: 503, body: #"{"error":{"code":"service_unavailable","message":"retry"}}"#)
+            }
+            return response(request, status: 200, body: #"{"access_token":"token-2","expires_in":3600}"#)
+        }
+        let client = Self.timedClient()
+        #expect(try await client.gatewayAccessToken() == "token-1")
+        #expect(try await Self.eventually(within: 3) { tokenCalls.snapshot() == 2 })
+        // A discarded token — the gateway refused it — is replaced at once,
+        // not after the failed refresh's retry interval.
+        await client.discardAccessToken()
+        #expect(try await client.gatewayAccessToken() == "token-2")
+    }
+
+    @Test
+    func onlyAFailureThatMayPassIsRetriedBehindTheToken() {
+        #expect(AppAIGatewayClient.mayPass(URLError(.timedOut)))
+        #expect(AppAIGatewayClient.mayPass(GatewayError(code: .unknown, message: "", statusCode: 503)))
+        #expect(!AppAIGatewayClient.mayPass(GatewayError(code: .unknown, message: "", statusCode: 403)))
+        #expect(!AppAIGatewayClient.mayPass(CancellationError()))
     }
 
     @Test

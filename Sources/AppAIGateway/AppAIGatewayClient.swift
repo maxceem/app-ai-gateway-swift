@@ -198,20 +198,40 @@ public actor AppAIGatewayClient {
     }
 
     /// One refresh that fails nobody. When it fails, the current token stays
-    /// in use for as long as the gateway still accepts it, and the refresh is
-    /// tried again after the token's retry interval — so an outage shorter than
-    /// the time left on the token goes unnoticed by the app. The gateway still
-    /// judges every request the token is sent with.
+    /// in use for as long as the gateway still accepts it. A failure that may
+    /// pass — the gateway or the network unavailable — is tried again after the
+    /// token's retry interval, so an outage shorter than the time left on the
+    /// token goes unnoticed by the app. Any other is not tried again behind the
+    /// token: retrying would only repeat it, and some of its recoveries cost
+    /// the app a purchase sync or an Apple attestation each. The next exchange
+    /// is then the one a request waits for once the token runs out, as before.
+    /// The gateway still judges every request the token is sent with.
     private func attemptRefresh() async {
+        let generation = tokenGeneration
         do {
             _ = try await refreshGatewayAccessToken()
             nextRefreshAttempt = nil
         } catch {
-            guard let accessToken, accessToken.usableUntil.timeIntervalSinceNow > 0 else { return }
+            // A discard since this began has settled what the client holds.
+            guard tokenGeneration == generation,
+                  let accessToken,
+                  accessToken.usableUntil.timeIntervalSinceNow > 0
+            else { return }
+            guard Self.mayPass(error) else {
+                nextRefreshAttempt = accessToken.usableUntil
+                return
+            }
             let next = Date().addingTimeInterval(accessToken.retryInterval)
             nextRefreshAttempt = next
             scheduleRefresh(at: next)
         }
+    }
+
+    /// Whether a failed refresh is worth trying again shortly: the gateway said
+    /// so, or the network failed before it could say anything.
+    static func mayPass(_ error: Error) -> Bool {
+        if let error = error as? GatewayError { return error.isRetryable }
+        return error is URLError
     }
 
     /// Refuses, without a request, while a window the gateway timed is still
@@ -732,6 +752,10 @@ public actor AppAIGatewayClient {
 
     /// Mints a token; `refreshGatewayAccessToken` decides whether it is cached.
     private func exchangeToken(forceIssuerRefresh: Bool, retryIssuerOnce: Bool) async throws -> AccessToken {
+        // The gateway counts the token's lifetime from when it mints it, so it
+        // is measured here from before the request: a slow exchange then never
+        // lets the token be sent past the gateway's own expiry.
+        let started = Date()
         do {
             let response: TokenResponse
             var keyID: String?
@@ -755,12 +779,11 @@ public actor AppAIGatewayClient {
             case .appAttest, .appAttestInstall:
                 (response, keyID) = try await productionExchange(forceIssuerRefresh: forceIssuerRefresh)
             }
-            let now = Date()
             let leeway = Self.refreshLeeway(for: response.expires_in)
             let token = AccessToken(
                 value: response.access_token,
-                refreshAt: now.addingTimeInterval(Self.refreshDelay(for: response.expires_in)),
-                usableUntil: now.addingTimeInterval(response.expires_in - Self.usableMargin(forLeeway: leeway)),
+                refreshAt: started.addingTimeInterval(Self.refreshDelay(for: response.expires_in)),
+                usableUntil: started.addingTimeInterval(response.expires_in - Self.usableMargin(forLeeway: leeway)),
                 retryInterval: Self.refreshRetryInterval(forLeeway: leeway),
                 keyID: keyID,
                 signsEveryRequest: keyID != nil && response.verify_on == Self.verifyOnEveryRequest
