@@ -12,6 +12,6 @@ enum ClientSDK {
     /// The release this source is. The package's `VERSION` file, which a
     /// release is cut from, is the source of truth; a test fails until this
     /// matches it, so bump both together.
-    static let version = "1.7.0"
+    static let version = "1.8.0"
     static let headerValue = "\(name)/\(version)"
 }
